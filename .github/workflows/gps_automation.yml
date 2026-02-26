@@ -1,0 +1,39 @@
+name: ThaiTracking DMS Automation Bot
+
+on:
+  workflow_dispatch: # กดรันเอง
+  schedule:
+    - cron: '5 23 * * *' # เวลา 23:05 UTC (06:05 ไทย)
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+
+    - name: Install dependencies
+      run: npm install
+
+    - name: Run Puppeteer Script
+      env:
+        GPS_USER: ${{ secrets.GPS_USER }}
+        GPS_PASSWORD: ${{ secrets.GPS_PASSWORD }}
+        EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+        EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+        EMAIL_TO: ${{ secrets.EMAIL_TO }}
+      run: node index.js
+
+    - name: Upload Error Screenshot (Debug)
+      if: failure() # ทำงานเฉพาะเมื่อ script error
+      uses: actions/upload-artifact@v4
+      with:
+        name: error-debug-screenshot
+        path: error_debug.png
+        retention-days: 1 # เก็บไฟล์ไว้แค่ 1 วัน
