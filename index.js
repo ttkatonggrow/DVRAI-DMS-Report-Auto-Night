@@ -578,8 +578,8 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
         await new Promise(r => setTimeout(r, 300));
         await reportPage.keyboard.press('Enter'); 
         
-        console.log('   Waiting 180s for report generation...');
-        await new Promise(r => setTimeout(r, 180000));
+        console.log('   Waiting 120s for report generation...');
+        await new Promise(r => setTimeout(r, 120000));
 
         // 6.5 กดปุ่ม EXCEL (Tab + Enter)
         console.log('   Clicking EXCEL (via Keyboard Tab+Enter)...');
@@ -589,8 +589,8 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
         console.log('   Pressed Enter on EXCEL button!');
         
         // SAVE
-        console.log('   Waiting 60s for Save Dialog...');
-        await new Promise(r => setTimeout(r, 60000)); 
+        console.log('   Waiting 3min for Save Dialog...');
+        await new Promise(r => setTimeout(r, 180000)); 
         
         console.log('   Clicking SAVE (Floppy Disk)...');
         let saveClicked = false;
