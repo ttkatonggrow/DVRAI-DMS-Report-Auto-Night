@@ -578,8 +578,8 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
         await new Promise(r => setTimeout(r, 300));
         await reportPage.keyboard.press('Enter'); 
         
-        console.log('   Waiting 120s for report generation...');
-        await new Promise(r => setTimeout(r, 120000));
+        console.log('   Waiting 180s for report generation...');
+        await new Promise(r => setTimeout(r, 180000));
 
         // 6.5 กดปุ่ม EXCEL (Tab + Enter)
         console.log('   Clicking EXCEL (via Keyboard Tab+Enter)...');
