@@ -579,14 +579,40 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
         // --- STEP 6: Report Filters ---
         console.log('6. Configuring Report Filters...');
         let dmsClicked = false;
-        try {
-            dmsClicked = await reportPage.evaluate(() => {
-                const buttons = Array.from(document.querySelectorAll('button'));
-                const dmsBtn = buttons.find(b => b.textContent.includes('รายงาน DMS'));
-                if (dmsBtn) { dmsBtn.click(); return true; }
-                return false;
-            });
-        } catch (e) {}
+        
+        // 1. เพิ่ม Fallback ค้นหาปุ่มด้วย XPath (แม่นยำกว่า)
+        const dmsSelectors = [
+            '//*[local-name()="svg" and @data-testid="FaceIcon"]/..', 
+            '//*[@id="root"]/div/div[2]/div[1]/div/button[2]', 
+            '//button[contains(., "รายงาน DMS")]'
+        ];
+
+        for (const selector of dmsSelectors) {
+            if (dmsClicked) break;
+            try {
+                const xpSelector = `xpath/${selector}`;
+                await reportPage.waitForSelector(xpSelector, { visible: true, timeout: 5000 });
+                const elements = await reportPage.$$(xpSelector);
+                if (elements.length > 0) {
+                    await elements[0].click();
+                    console.log(`   Clicked DMS via XPath: ${selector}`);
+                    dmsClicked = true;
+                }
+            } catch (e) {}
+        }
+
+        // 2. ถ้าหาไม่เจอจริงๆ ค่อยใช้ JS Fallback
+        if (!dmsClicked) {
+            try {
+                dmsClicked = await reportPage.evaluate(() => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const dmsBtn = buttons.find(b => b.textContent.includes('รายงาน DMS'));
+                    if (dmsBtn) { dmsBtn.click(); return true; }
+                    return false;
+                });
+                if (dmsClicked) console.log('   Clicked DMS via JS Text Search');
+            } catch (e) {}
+        }
         
         if (!dmsClicked) throw new Error('Could not select DMS Report button.');
 
@@ -640,8 +666,8 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
         await new Promise(r => setTimeout(r, 500));
         await reportPage.keyboard.press('Enter');
         
-        console.log('   Waiting 60s for Save Dialog...');
-        await new Promise(r => setTimeout(r, 60000)); 
+        console.log('   Waiting 3min for Save Dialog...');
+        await new Promise(r => setTimeout(r, 180000)); 
         
         console.log('   Clicking SAVE (Floppy Disk)...');
         const saveXPath = `//*[@id="root"]/div/div[1]/div[2]/div[2]/div/div/div/ul/li/div/div/div/div/button/svg | //*[@data-testid="SaveOutlinedIcon"]`;
