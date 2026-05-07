@@ -4,7 +4,7 @@ const nodemailer = require('nodemailer');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const ExcelJS = require('exceljs'); // ใช้ exceljs แทน xlsx
+const ExcelJS = require('exceljs'); 
 
 // --- CONFIGURATION ---
 const config = {
@@ -13,20 +13,17 @@ const config = {
     emailFrom: process.env.EMAIL_FROM || '',
     emailPass: process.env.EMAIL_PASSWORD || '',
     emailTo: process.env.EMAIL_TO || '',
-    downloadTimeout: 40000 
+    downloadTimeout: 40000
 };
 
-// กำหนด Path หลักที่เราต้องการ (ใน Project folder)
 const downloadPath = path.resolve(__dirname, 'downloads');
-// กำหนด Path สำรอง (Default Downloads ของ User)
 const defaultDownloadPath = path.join(os.homedir(), 'Downloads');
 
-// สร้างโฟลเดอร์ download ถ้ายังไม่มี
 if (!fs.existsSync(downloadPath)) {
     fs.mkdirSync(downloadPath);
 }
 
-// ฟังก์ชันรอจนกว่าไฟล์จะโหลดเสร็จ
+// ฟังก์ชันรอไฟล์โหลด
 async function waitForFileToDownload(timeout) {
     return new Promise((resolve, reject) => {
         let timer;
@@ -39,9 +36,7 @@ async function waitForFileToDownload(timeout) {
 
         const checker = setInterval(() => {
             const dirsToCheck = [downloadPath];
-            if (fs.existsSync(defaultDownloadPath)) {
-                dirsToCheck.push(defaultDownloadPath);
-            }
+            if (fs.existsSync(defaultDownloadPath)) dirsToCheck.push(defaultDownloadPath);
 
             let foundFile = null;
             let foundDir = null;
@@ -51,20 +46,17 @@ async function waitForFileToDownload(timeout) {
                     const files = fs.readdirSync(dir);
                     if (files.length > 0) {
                         const validFiles = files.filter(f => !f.startsWith('.') && !f.endsWith('.crdownload') && !f.endsWith('.tmp'));
-                        
                         if (validFiles.length > 0) {
                             const latest = validFiles
                                 .map(f => ({ name: f, path: path.join(dir, f), time: fs.statSync(path.join(dir, f)).mtime.getTime() }))
                                 .sort((a, b) => b.time - a.time)[0];
                             
                             if (latest && (Date.now() - latest.time < timeout + 60000)) { 
-                                foundFile = latest;
-                                foundDir = dir;
-                                break;
+                                foundFile = latest; foundDir = dir; break;
                             }
                         }
                     }
-                } catch (e) { /* Ignore access errors */ }
+                } catch (e) { }
             }
 
             if (foundFile) {
@@ -77,103 +69,82 @@ async function waitForFileToDownload(timeout) {
                         if (fs.existsSync(filePath)) {
                             const size2 = fs.statSync(filePath).size;
                             if (size1 === size2) {
-                                clearInterval(checker);
-                                clearTimeout(timer);
+                                clearInterval(checker); clearTimeout(timer);
                                 console.log(`      File confirmed: ${filePath}`);
                                 resolve(filePath);
+                            } else {
+                                console.log(`      File still downloading (${size1} -> ${size2})...`);
                             }
                         }
-                    }, 3000);
+                    }, 5000); // รอ 5 วิให้ไฟล์นิ่ง
                     return;
                 }
             }
 
             timePassed += checkInterval;
             if (timePassed >= timeout) {
-                clearInterval(checker);
-                clearTimeout(timer);
+                clearInterval(checker); clearTimeout(timer);
                 reject(new Error(`Download timeout (${timeout}ms). No new files found.`));
             }
         }, checkInterval);
     });
 }
 
-// ฟังก์ชันจัดรูปแบบ Sheet (Border + Auto Width + Header Style)
+// ฟังก์ชันจัดรูปแบบ Sheet
 function formatSheet(worksheet) {
-    // 1. จัด Header (แถวแรก)
-    const headerRow = worksheet.getRow(1);
-    headerRow.font = { bold: true };
-    headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
-    headerRow.eachCell((cell) => {
-        cell.fill = {
-            type: 'pattern',
-            pattern: 'solid',
-            fgColor: { argb: 'FFD3D3D3' } // สีเทาอ่อน
-        };
-        cell.border = {
-            top: { style: 'thin' },
-            left: { style: 'thin' },
-            bottom: { style: 'thin' },
-            right: { style: 'thin' }
-        };
-    });
-
-    // 2. จัด Auto Width และ Border ให้ข้อมูล
     worksheet.columns.forEach(column => {
         let maxLength = 0;
         if (column && column.eachCell) {
             column.eachCell({ includeEmpty: true }, function(cell) {
                 const columnLength = cell.value ? cell.value.toString().length : 10;
-                if (columnLength > maxLength) {
-                    maxLength = columnLength;
-                }
-                // ใส่เส้นขอบทุกช่อง
-                cell.border = {
-                    top: { style: 'thin' },
-                    left: { style: 'thin' },
-                    bottom: { style: 'thin' },
-                    right: { style: 'thin' }
-                };
+                if (columnLength > maxLength) maxLength = columnLength;
+                cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
             });
             column.width = maxLength < 10 ? 10 : maxLength + 2;
         }
     });
+
+    const headerRow = worksheet.getRow(1);
+    headerRow.eachCell((cell) => {
+        cell.font = { bold: true };
+        cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD3D3D3' } };
+        cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+    });
 }
 
-// ฟังก์ชันประมวลผล Excel (ทำ Pivot Table ด้วย exceljs + จัดรูปแบบเต็มสูบ)
+// ฟังก์ชันทำ Pivot
 async function processExcelFile(filePath) {
     try {
         console.log(`   Processing Excel file (with exceljs): ${filePath}`);
-        
         const workbook = new ExcelJS.Workbook();
-        
-        // ตรวจสอบนามสกุลไฟล์เพื่อใช้วิธีอ่านที่ถูกต้อง
         const ext = path.extname(filePath).toLowerCase();
-        if (ext === '.csv') {
+        
+        try {
+            if (ext === '.csv') await workbook.csv.readFile(filePath);
+            else await workbook.xlsx.readFile(filePath);
+        } catch (e) {
+            console.error('   Read failed, trying as CSV fallback...');
             await workbook.csv.readFile(filePath);
-        } else {
-            await workbook.xlsx.readFile(filePath);
         }
 
-        const worksheet = workbook.worksheets[0]; // เอา Sheet แรก
+        const worksheet = workbook.worksheets[0]; 
+        if (!worksheet) {
+            console.warn('   No worksheet found.');
+            return { filePath, pivotData: {} };
+        }
         
-        // จัดรูปแบบ Sheet เดิมก่อน
         formatSheet(worksheet);
 
-        // --- เตรียมข้อมูลทำ Pivot ---
-        // อ่าน Header row (แถว 1)
         const firstRow = worksheet.getRow(1);
         const headers = [];
         firstRow.eachCell((cell, colNumber) => {
             headers[colNumber] = cell.value ? cell.value.toString().trim() : '';
         });
 
-        console.log(`   Headers found: ${JSON.stringify(headers)}`);
-
         let licensePlateIndex = -1;
         let reportTypeIndex = -1;
 
-        // หา Index ของคอลัมน์ (ExcelJS index เริ่มที่ 1)
         headers.forEach((header, index) => {
             if (header) {
                 if (header.includes('ทะเบียน') || header.includes('License') || header.includes('ชื่อรถ')) licensePlateIndex = index;
@@ -181,22 +152,14 @@ async function processExcelFile(filePath) {
             }
         });
 
-        // Fallback Index (ถ้าหาไม่เจอ ใช้คอลัมน์ 1 และ 2)
-        if (licensePlateIndex === -1) {
-            console.log('   Warning: "License" header not found. Defaulting to Column 1.');
-            licensePlateIndex = 1;
-        }
-        if (reportTypeIndex === -1) {
-            console.log('   Warning: "Type" header not found. Defaulting to Column 2.');
-            reportTypeIndex = 2;
-        }
+        if (licensePlateIndex === -1) licensePlateIndex = 1;
+        if (reportTypeIndex === -1) reportTypeIndex = 2;
 
         const pivotData = {};
         const allTypes = new Set();
 
-        // วนลูปข้อมูล (เริ่มแถว 2)
         worksheet.eachRow((row, rowNumber) => {
-            if (rowNumber === 1) return; // ข้าม Header
+            if (rowNumber === 1) return; 
 
             const plateCell = row.getCell(licensePlateIndex);
             const typeCell = row.getCell(reportTypeIndex);
@@ -213,21 +176,16 @@ async function processExcelFile(filePath) {
             }
         });
 
-        // --- สร้าง Sheet ใหม่ (Summary_Pivot) ---
         const pivotSheetName = "Summary_Pivot";
         const oldSheet = workbook.getWorksheet(pivotSheetName);
-        if (oldSheet) {
-            workbook.removeWorksheet(oldSheet.id);
-        }
+        if (oldSheet) workbook.removeWorksheet(oldSheet.id);
 
         const pivotSheet = workbook.addWorksheet(pivotSheetName);
 
-        // สร้าง Header สำหรับ Pivot
         const typeArray = Array.from(allTypes).sort();
         const pivotHeaders = ['ทะเบียนรถ', ...typeArray, 'รวมทั้งหมด'];
         pivotSheet.addRow(pivotHeaders);
 
-        // ใส่ข้อมูล Pivot
         for (const plate in pivotData) {
             const rowData = [plate];
             let total = 0;
@@ -240,28 +198,197 @@ async function processExcelFile(filePath) {
             pivotSheet.addRow(rowData);
         }
 
-        // จัดรูปแบบ Sheet ใหม่ (เส้นขอบ + Auto Width)
         formatSheet(pivotSheet);
 
-        // บันทึกไฟล์ทับ (ต้องเป็น .xlsx)
         let outputFilePath = filePath;
-        if (ext !== '.xlsx') {
-            outputFilePath = filePath.replace(ext, '.xlsx');
+        if (path.extname(filePath) !== '.xlsx') {
+            outputFilePath = filePath.substring(0, filePath.lastIndexOf('.')) + '.xlsx';
         }
         
         await workbook.xlsx.writeFile(outputFilePath);
         console.log(`   Excel file processed and saved to: ${outputFilePath}`);
         
-        return outputFilePath;
+        // Return ทั้ง Path และข้อมูลที่สรุปแล้วเอาไปทำ PDF ต่อ
+        return { filePath: outputFilePath, pivotData: pivotData };
 
     } catch (error) {
-        console.error('   Error processing Excel file with exceljs:', error.message);
-        return filePath;
+        console.error('   Error processing Excel file:', error.message);
+        return { filePath: filePath, pivotData: {} };
     }
 }
 
-// ฟังก์ชันส่งอีเมล
-async function sendEmail(subject, message, attachmentPath = null) {
+// ฟังก์ชันสร้าง PDF (DMS Dashboard)
+async function generatePDFSummary(page, pivotData, dateStr) {
+    console.log('   Generating PDF Summary Report...');
+    
+    // 1. จัดเตรียมข้อมูล (เรียง Top 10)
+    let yawningStats = [];
+    let sleepingStats = [];
+    let totalYawning = 0;
+    let totalSleeping = 0;
+
+    for (const [license, types] of Object.entries(pivotData)) {
+        const yawn = types['แจ้งเตือนการหาวนอน'] || types['Yawning'] || 0;
+        const sleep = types['แจ้งเตือนการหลับตา'] || types['Closing eyes'] || 0;
+        
+        if (yawn > 0) { yawningStats.push({ license, count: yawn }); totalYawning += yawn; }
+        if (sleep > 0) { sleepingStats.push({ license, count: sleep }); totalSleeping += sleep; }
+    }
+
+    // เรียงจากมากไปน้อย
+    yawningStats.sort((a, b) => b.count - a.count);
+    sleepingStats.sort((a, b) => b.count - a.count);
+
+    const top10Yawning = yawningStats.slice(0, 10);
+    const top10Sleeping = sleepingStats.slice(0, 10);
+
+    const maxYawnCount = top10Yawning.length > 0 ? top10Yawning[0].count : 1;
+    const maxSleepCount = top10Sleeping.length > 0 ? top10Sleeping[0].count : 1;
+
+    // 2. สร้าง HTML (แก้เวลาเป็น Night Shift)
+    const html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@300;400;600;700&display=swap" rel="stylesheet">
+        <style>
+        @page { size: A4; margin: 0; }
+        body { font-family: 'Noto Sans Thai', sans-serif; margin: 0; padding: 0; background: #fff; color: #333; }
+        .page { width: 210mm; height: 296mm; position: relative; page-break-after: always; overflow: hidden; }
+        .content { padding: 40px; }
+        .header-banner { background: #1E40AF; color: white; padding: 15px 40px; font-size: 24px; font-weight: bold; margin-bottom: 30px; }
+        h1 { font-size: 32px; color: #1E40AF; margin-bottom: 10px; }
+        .grid-2x2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 50px; }
+        .card { background: #F8FAFC; border-radius: 12px; padding: 30px; text-align: center; border: 1px solid #E2E8F0; }
+        .card-title { font-size: 18px; font-weight: bold; margin-bottom: 10px; }
+        .card-value { font-size: 48px; font-weight: bold; margin: 10px 0; }
+        .card-sub { font-size: 14px; color: #64748B; }
+        .c-blue { color: #1E40AF; }
+        .c-orange { color: #F59E0B; }
+        .c-red { color: #DC2626; }
+        .chart-container { margin: 40px 0; }
+        .bar-row { display: flex; align-items: center; margin-bottom: 15px; }
+        .bar-label { width: 200px; text-align: right; padding-right: 15px; font-weight: 600; font-size: 14px; }
+        .bar-track { flex-grow: 1; background: #F1F5F9; height: 30px; border-radius: 4px; overflow: hidden; }
+        .bar-fill { height: 100%; display: flex; align-items: center; justify-content: flex-end; padding-right: 10px; color: white; font-size: 12px; font-weight: bold; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th { background: #1E40AF; color: white; padding: 12px; text-align: left; font-size: 14px; }
+        td { padding: 10px; border-bottom: 1px solid #E2E8F0; font-size: 14px; }
+        tr:nth-child(even) { background: #F8FAFC; }
+        </style>
+    </head>
+    <body>
+
+        <!-- Page 1: Summary -->
+        <div class="page">
+            <div style="text-align: center; padding-top: 60px;">
+                <h1 style="font-size: 40px;">รายงานสรุปพฤติกรรมการขับขี่ (DMS)</h1>
+                <div style="font-size: 24px; color: #64748B;">Driver Monitoring System Report</div>
+                <div style="margin-top: 20px; font-size: 18px;">วันที่สิ้นสุด: ${dateStr} (รอบเวลา 18:00 - 06:00 น.)</div>
+            </div>
+
+            <div class="content">
+                <div class="header-banner" style="margin-top: 40px; text-align: center;">บทสรุปยอดรวม (Executive Summary)</div>
+                <div class="grid-2x2">
+                    <div class="card">
+                        <div class="card-title c-orange">แจ้งเตือนการหาวนอน (Yawning)</div>
+                        <div class="card-value c-orange">${totalYawning}</div>
+                        <div class="card-sub">จำนวนครั้งทั้งหมด</div>
+                    </div>
+                    <div class="card">
+                        <div class="card-title c-red">แจ้งเตือนการหลับตา (Closing Eyes)</div>
+                        <div class="card-value c-red">${totalSleeping}</div>
+                        <div class="card-sub">จำนวนครั้งทั้งหมด</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Page 2: Yawning Details -->
+        <div class="page">
+            <div class="header-banner">1. สถิติแจ้งเตือนการหาวนอน (Top 10)</div>
+            <div class="content">
+                <div class="chart-container">
+                ${top10Yawning.slice(0, 5).map(item => `
+                    <div class="bar-row">
+                    <div class="bar-label">${item.license}</div>
+                    <div class="bar-track">
+                        <div class="bar-fill" style="width: ${(item.count / maxYawnCount) * 100}%; background: #F59E0B;">${item.count} ครั้ง</div>
+                    </div>
+                    </div>
+                `).join('')}
+                ${top10Yawning.length === 0 ? '<div style="text-align:center; padding: 20px; color:#888;">ไม่มีข้อมูลในรอบเวลานี้</div>' : ''}
+                </div>
+
+                <table>
+                    <thead>
+                        <tr><th style="width:50px;">No.</th><th>ทะเบียนรถ</th><th>จำนวนครั้งที่แจ้งเตือน (ครั้ง)</th></tr>
+                    </thead>
+                    <tbody>
+                        ${top10Yawning.map((item, idx) => `
+                        <tr>
+                            <td>${idx + 1}</td>
+                            <td>${item.license}</td>
+                            <td style="font-weight: bold; color: #F59E0B;">${item.count}</td>
+                        </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Page 3: Sleeping Details -->
+        <div class="page">
+            <div class="header-banner">2. สถิติแจ้งเตือนการหลับตา (Top 10)</div>
+            <div class="content">
+                <div class="chart-container">
+                ${top10Sleeping.slice(0, 5).map(item => `
+                    <div class="bar-row">
+                    <div class="bar-label">${item.license}</div>
+                    <div class="bar-track">
+                        <div class="bar-fill" style="width: ${(item.count / maxSleepCount) * 100}%; background: #DC2626;">${item.count} ครั้ง</div>
+                    </div>
+                    </div>
+                `).join('')}
+                ${top10Sleeping.length === 0 ? '<div style="text-align:center; padding: 20px; color:#888;">ไม่มีข้อมูลในรอบเวลานี้</div>' : ''}
+                </div>
+
+                <table>
+                    <thead>
+                        <tr><th style="width:50px;">No.</th><th>ทะเบียนรถ</th><th>จำนวนครั้งที่แจ้งเตือน (ครั้ง)</th></tr>
+                    </thead>
+                    <tbody>
+                        ${top10Sleeping.map((item, idx) => `
+                        <tr>
+                            <td>${idx + 1}</td>
+                            <td>${item.license}</td>
+                            <td style="font-weight: bold; color: #DC2626;">${item.count}</td>
+                        </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+    </body>
+    </html>
+    `;
+
+    // ใช้ page ปัจจุบันวาด HTML ลงไปแล้วสั่งปรินต์เป็น PDF
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    const pdfPath = path.join(downloadPath, `DMS_Report_Summary_Night_${dateStr}.pdf`);
+    await page.pdf({
+        path: pdfPath,
+        format: 'A4',
+        printBackground: true
+    });
+    console.log(`   ✅ PDF Generated successfully: ${pdfPath}`);
+    return pdfPath;
+}
+
+// ฟังก์ชันส่งอีเมล (รองรับหลายไฟล์)
+async function sendEmail(subject, message, attachmentPaths = []) {
     if (!config.emailFrom || !config.emailPass) {
         console.log('Skipping email: No credentials provided.');
         return;
@@ -272,13 +399,11 @@ async function sendEmail(subject, message, attachmentPath = null) {
         auth: { user: config.emailFrom, pass: config.emailPass }
     });
 
-    const attachments = [];
-    if (attachmentPath && fs.existsSync(attachmentPath)) {
-        attachments.push({
-            filename: path.basename(attachmentPath), 
-            path: attachmentPath
-        });
-    }
+    // วนลูปไฟล์แนบ
+    const attachments = attachmentPaths.filter(p => p && fs.existsSync(p)).map(p => ({
+        filename: path.basename(p), 
+        path: p
+    }));
 
     const mailOptions = {
         from: `"Thai Tracking DMS Reporter" <${config.emailFrom}>`,
@@ -296,7 +421,6 @@ async function sendEmail(subject, message, attachmentPath = null) {
     }
 }
 
-// ฟังก์ชันช่วยคลิก Element โดยใช้ XPath
 async function clickByXPath(page, xpath, description = 'Element', timeout = 10000) {
     try {
         const selector = xpath.startsWith('xpath/') ? xpath : `xpath/${xpath}`;
@@ -314,6 +438,7 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
 }
 
 (async () => {
+    // ระบุให้ชัดเจนใน Log ว่าเป็น Night Shift
     console.log(`--- Started GPS Report Automation (Night Shift) [${new Date().toLocaleString()}] ---`);
     
     if (!config.gpsUser || !config.gpsPass) {
@@ -352,16 +477,9 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
     
     try {
         const client = await page.target().createCDPSession();
-        await client.send('Page.setDownloadBehavior', {
-            behavior: 'allow',
-            downloadPath: downloadPath,
-        });
-        await client.send('Browser.setDownloadBehavior', {
-            behavior: 'allow',
-            downloadPath: downloadPath,
-            eventsEnabled: true 
-        }); 
-    } catch(e) { console.log('CDP Setup Warning:', e.message); }
+        await client.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadPath });
+        await client.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadPath, eventsEnabled: true }); 
+    } catch(e) { }
 
     try {
         const context = browser.defaultBrowserContext();
@@ -371,7 +489,6 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
     page.setDefaultTimeout(60000);
 
     try {
-        // --- LOGIN LOOP ---
         let isLoggedIn = false;
         const maxRetries = 20;
 
@@ -379,7 +496,6 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
             try {
                 console.log(`\n>>> Login Attempt ${attempt}/${maxRetries} <<<`);
                 await page.goto('https://dvrai.net/808gps/login.html', { waitUntil: 'networkidle0' });
-
                 await page.waitForSelector('#lwm'); 
                 await new Promise(r => setTimeout(r, 2000)); 
                 
@@ -395,10 +511,7 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
                 const captchaCode = text.trim().replace(/\s/g, '');
                 console.log(`   READ CAPTCHA: "${captchaCode}"`);
 
-                if (!captchaCode || captchaCode.length < 4) {
-                    console.warn(`   !!! Invalid Captcha. Retrying...`);
-                    continue; 
-                }
+                if (!captchaCode || captchaCode.length < 4) { continue; }
 
                 await page.type('#loginAccount', config.gpsUser);
                 await page.type('#loginPassword', config.gpsPass);
@@ -410,19 +523,13 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
                     page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 5000 }).catch(() => {})
                 ]);
 
-                if (page.url().includes('login.html')) {
-                    console.warn('   !!! Login Failed. Retrying...');
-                    continue; 
-                } else {
+                if (!page.url().includes('login.html')) {
                     console.log('   SUCCESS: Login Successful!');
                     isLoggedIn = true;
-                    console.log('   Waiting 10s for dashboard...');
                     await new Promise(r => setTimeout(r, 10000));
                     break; 
                 }
-            } catch (err) {
-                console.warn(`   Error during login: ${err.message}`);
-            }
+            } catch (err) { }
         }
 
         if (!isLoggedIn) throw new Error(`Failed to login.`);
@@ -438,36 +545,17 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
             const currentPages = await browser.pages();
             if (currentPages.length > initialPageCount) {
                 reportPage = currentPages[currentPages.length - 1]; 
-                console.log(`   >>> New tab detected! URL: ${reportPage.url()}`);
-                
-                const pageTitle = await reportPage.title();
-                if (pageTitle.includes('Privacy') || pageTitle.includes('Security')) {
-                    try {
-                        const advanced = await reportPage.$('#details-button');
-                        if (advanced) {
-                            await advanced.click();
-                            await new Promise(r => setTimeout(r, 1000));
-                            const proceed = await reportPage.$('#proceed-link');
-                            if (proceed) await proceed.click();
-                        }
-                    } catch (e) {}
-                }
                 break;
             }
-
             try {
                 const jsResult = await page.evaluate(() => {
-                    if (typeof showReportCenter === 'function') {
-                        showReportCenter();
-                        return 'Executed showReportCenter() directly';
-                    } else {
-                        const btn = document.querySelector('div[onclick*="showReportCenter"]') || 
-                                    document.querySelector('#main-topPanel > div.header-nav > div:nth-child(7)');
-                        if (btn) { btn.click(); return 'Clicked element via JS'; }
+                    if (typeof showReportCenter === 'function') { showReportCenter(); return true; } 
+                    else {
+                        const btn = document.querySelector('div[onclick*="showReportCenter"]') || document.querySelector('#main-topPanel > div.header-nav > div:nth-child(7)');
+                        if (btn) { btn.click(); return true; }
                     }
-                    return null;
+                    return false;
                 });
-                if (jsResult) console.log(`   Triggered: ${jsResult}`);
             } catch (e) {}
             await new Promise(r => setTimeout(r, 5000));
         }
@@ -480,63 +568,30 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
         
         try { await reportPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }); } catch(e) {}
         try { await reportPage.waitForSelector('xpath//*[@id="root"]', { timeout: 10000 }); } catch (e) {}
-        
         await reportPage.setViewport({ width: 1920, height: 1080 });
 
         try {
             const clientReport = await reportPage.target().createCDPSession();
-            await clientReport.send('Page.setDownloadBehavior', {
-                behavior: 'allow',
-                downloadPath: downloadPath,
-            });
-            await clientReport.send('Browser.setDownloadBehavior', { 
-                behavior: 'allow', 
-                downloadPath: downloadPath, 
-                eventsEnabled: true 
-            });
+            await clientReport.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadPath });
+            await clientReport.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadPath, eventsEnabled: true });
         } catch (e) {}
 
         // --- STEP 6: Report Filters ---
         console.log('6. Configuring Report Filters...');
-        
         let dmsClicked = false;
-        const dmsSelectors = [
-            '//*[local-name()="svg" and @data-testid="FaceIcon"]/..', 
-            '//*[@id="root"]/div/div[2]/div[1]/div/button[2]', 
-            '//button[contains(., "รายงาน DMS")]'
-        ];
-
-        for (const selector of dmsSelectors) {
-            if (dmsClicked) break;
-            try {
-                const xpSelector = `xpath/${selector}`;
-                await reportPage.waitForSelector(xpSelector, { visible: true, timeout: 5000 });
-                const elements = await reportPage.$$(xpSelector);
-                if (elements.length > 0) {
-                    await elements[0].click();
-                    dmsClicked = true;
-                }
-            } catch (e) {}
-        }
-
-        if (!dmsClicked) {
-             try {
-                const jsClicked = await reportPage.evaluate(() => {
-                    const buttons = Array.from(document.querySelectorAll('button'));
-                    const dmsBtn = buttons.find(b => b.textContent.includes('รายงาน DMS'));
-                    if (dmsBtn) { dmsBtn.click(); return true; }
-                    return false;
-                });
-                if (jsClicked) dmsClicked = true;
-             } catch (e) {}
-        }
+        try {
+            dmsClicked = await reportPage.evaluate(() => {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                const dmsBtn = buttons.find(b => b.textContent.includes('รายงาน DMS'));
+                if (dmsBtn) { dmsBtn.click(); return true; }
+                return false;
+            });
+        } catch (e) {}
         
         if (!dmsClicked) throw new Error('Could not select DMS Report button.');
 
-        console.log('   Selecting Alerts...');
         await new Promise(r => setTimeout(r, 2000)); 
         await clickByXPath(reportPage, '//div[contains(@class, "css-xn5mga")]//tr[2]//td[2]//div/div', 'Alert Type Dropdown');
-        
         await new Promise(r => setTimeout(r, 1000));
 
         const selectOption = async (optionText) => {
@@ -550,7 +605,7 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
         await selectOption('แจ้งเตือนการหลับตา');
         await reportPage.keyboard.press('Escape');
 
-        // --- Date Inputs (Logic: Yesterday 18:00 - Today 06:00) ---
+        // --- Date Inputs (Night Shift Logic) ---
         const todayObj = new Date();
         const yesterdayObj = new Date(todayObj);
         yesterdayObj.setDate(yesterdayObj.getDate() - 1);
@@ -558,6 +613,7 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
         const todayStr = todayObj.toISOString().slice(0, 10);
         const yesterdayStr = yesterdayObj.toISOString().slice(0, 10);
 
+        // ดึงข้อมูล 18:00 ของเมื่อวาน ถึง 06:00 ของวันนี้
         const startDateTime = `${yesterdayStr} 18:00:00`;
         const endDateTime = `${todayStr} 06:00:00`;
         
@@ -571,8 +627,6 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
         await reportPage.keyboard.down('Control'); await reportPage.keyboard.press('A'); await reportPage.keyboard.up('Control');
         await reportPage.keyboard.press('Backspace'); await reportPage.keyboard.type(endDateTime); await reportPage.keyboard.press('Enter');
 
-        // --- Tab + Enter to Search ---
-        console.log('   Pressing Tab + Enter to Search...');
         await new Promise(r => setTimeout(r, 500)); 
         await reportPage.keyboard.press('Tab'); 
         await new Promise(r => setTimeout(r, 300));
@@ -581,67 +635,52 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
         console.log('   Waiting 120s for report generation...');
         await new Promise(r => setTimeout(r, 120000));
 
-        // 6.5 กดปุ่ม EXCEL (Tab + Enter)
         console.log('   Clicking EXCEL (via Keyboard Tab+Enter)...');
         await reportPage.keyboard.press('Tab');
         await new Promise(r => setTimeout(r, 500));
         await reportPage.keyboard.press('Enter');
-        console.log('   Pressed Enter on EXCEL button!');
         
-        // SAVE
-        console.log('   Waiting 3min for Save Dialog...');
-        await new Promise(r => setTimeout(r, 180000)); 
+        console.log('   Waiting 60s for Save Dialog...');
+        await new Promise(r => setTimeout(r, 60000)); 
         
         console.log('   Clicking SAVE (Floppy Disk)...');
-        let saveClicked = false;
-        saveClicked = await reportPage.evaluate(() => {
-            const saveBtn = document.querySelector("#root > div > div.MuiBox-root.css-jbmhbb > div.ant-card.ant-card-bordered.css-y8x9xp > div.ant-card-body > div > div > div > ul > li > div > div > div > div > button");
-            if (saveBtn) { saveBtn.click(); return true; }
-            return false;
-        });
+        const saveXPath = `//*[@id="root"]/div/div[1]/div[2]/div[2]/div/div/div/ul/li/div/div/div/div/button/svg | //*[@data-testid="SaveOutlinedIcon"]`;
+        await clickByXPath(reportPage, saveXPath, 'Save Icon', 60000).catch(() => console.log('Try JS Save'));
 
-        if (!saveClicked) {
-            const saveXPath = `//*[@id="root"]/div/div[1]/div[2]/div[2]/div/div/div/ul/li/div/div/div/div/button/svg | //*[@data-testid="SaveOutlinedIcon"]`;
-            await clickByXPath(reportPage, saveXPath, 'Save Icon', 60000);
-        }
-
-        // --- STEP 7: Wait for Download ---
         console.log('7. Waiting for file download...');
         let downloadedFile = await waitForFileToDownload(config.downloadTimeout);
-        console.log(`   File downloaded: ${downloadedFile}`);
 
-        // --- FIX: Rename file ---
         const ext = path.extname(downloadedFile);
         if (!ext || (ext !== '.xls' && ext !== '.xlsx')) {
-            console.log(`   Renaming file to .xls...`);
             const dir = path.dirname(downloadedFile);
-            const newName = `GPS_Report_${todayStr}.xls`;
+            const newName = `GPS_Report_Night_${todayStr}.xlsx`;
             const newFilePath = path.join(dir, newName);
             if (fs.existsSync(newFilePath)) try { fs.unlinkSync(newFilePath); } catch(e) {}
-            try {
-                fs.renameSync(downloadedFile, newFilePath);
-                downloadedFile = newFilePath;
-                console.log(`   Renamed file to: ${downloadedFile}`);
-            } catch (e) {}
+            try { fs.renameSync(downloadedFile, newFilePath); downloadedFile = newFilePath; } catch (e) {}
         }
 
-        // --- NEW STEP: Process Excel & Add Pivot Sheet (with ExcelJS) ---
-        downloadedFile = await processExcelFile(downloadedFile);
+        // --- NEW STEP: Process Excel & Extract Pivot Data ---
+        const processResult = await processExcelFile(downloadedFile);
+        downloadedFile = processResult.filePath;
+        const pivotData = processResult.pivotData;
+
+        // --- NEW STEP: Generate PDF ---
+        // ใช้หน้า page หลักของ Puppeteer ในการสร้าง PDF HTML
+        const pdfFilePath = await generatePDFSummary(page, pivotData, todayStr);
 
         // --- STEP 8: Email ---
         console.log(`8. Sending Email...`);
         await sendEmail(
-            `THAI TRACKING DMS REPORT: ${todayStr}`, 
-            `ถึง ผู้เกี่ยวข้อง\nรายงาน THAI TRACKING DMS REPORT รอบ 18:00 ถึง 06:00 น.\nด้วยความนับถือ\nBOT REPORT`, 
-            downloadedFile
+            `THAI TRACKING DMS REPORT: ${todayStr} (Night Shift)`, 
+            `ถึง ผู้เกี่ยวข้อง\nรายงาน THAI TRACKING DMS REPORT รอบ 18:00 ถึง 06:00 น. และ สรุปกราฟ PDF Top 10\nด้วยความนับถือ\nBOT REPORT`, 
+            [downloadedFile, pdfFilePath] // แนบไป 2 ไฟล์
         );
 
         // --- STEP 9: Cleanup ---
-        console.log('9. Cleaning up...');
-        if (fs.existsSync(downloadedFile)) {
-            fs.unlinkSync(downloadedFile);
-            console.log('   File deleted.');
-        }
+        console.log('9. Cleaning up files...');
+        if (fs.existsSync(downloadedFile)) fs.unlinkSync(downloadedFile);
+        if (fs.existsSync(pdfFilePath)) fs.unlinkSync(pdfFilePath);
+        console.log('   Cleanup done.');
 
     } catch (error) {
         console.error('!!! PROCESS FAILED !!!', error);
@@ -649,7 +688,7 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
         const activePage = pages[pages.length - 1]; 
         const errorScreenshotPath = path.resolve(__dirname, 'error_debug.png');
         await activePage.screenshot({ path: errorScreenshotPath, fullPage: true });
-        await sendEmail(`GPS Automation FAILED`, `Error details: ${error.message}`);
+        await sendEmail(`GPS Automation FAILED`, `Error details: ${error.message}`, [errorScreenshotPath]);
         process.exit(1);
     } finally {
         await browser.close();
