@@ -23,6 +23,73 @@ if (!fs.existsSync(downloadPath)) {
     fs.mkdirSync(downloadPath);
 }
 
+// =====================================================================
+// NEW: ส่วนที่ 1 ฟังก์ชันจัดกลุ่มเวลาและสร้างกราฟ (Add-on)
+// =====================================================================
+function get30MinBin(dateTimeStr) {
+    if (!dateTimeStr) return null;
+    const dateTimeStrStr = dateTimeStr.toString();
+    const parts = dateTimeStrStr.split(' ');
+    if (parts.length < 2) return null; 
+    
+    const timePart = parts[1]; 
+    const timeParts = timePart.split(':');
+    if (timeParts.length < 2) return null;
+    
+    const hr = timeParts[0];
+    const min = timeParts[1];
+    const minBin = parseInt(min) >= 30 ? '30' : '00';
+    return `${hr}:${minBin}`;
+}
+
+const timeLabels = [
+    "18:00", "18:30", "19:00", "19:30", "20:00", "20:30",
+    "21:00", "21:30", "22:00", "22:30", "23:00", "23:30",
+    "00:00", "00:30", "01:00", "01:30", "02:00", "02:30",
+    "03:00", "03:30", "04:00", "04:30", "05:00", "05:30"
+];
+
+function generateChartUrl(type, labels, data) {
+    const title = type === 'yawning' 
+        ? 'สถิติแจ้งเตือนการหาวนอน [ราย 30 นาที]' 
+        : 'สถิติแจ้งเตือนการหลับตา [ราย 30 นาที]';
+    const color = type === 'yawning' ? 'rgba(245, 158, 11, 0.8)' : 'rgba(220, 38, 38, 0.8)'; // ส้ม(หาว), แดง(หลับ) ให้ตรงกับ Theme ของคุณ
+    
+    const chartConfig = {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'จำนวนครั้ง',
+                data: data,
+                backgroundColor: color,
+                borderColor: color.replace('0.8', '1'),
+                borderWidth: 1
+            }]
+        },
+        options: {
+            title: { display: true, text: title, fontSize: 18, fontColor: '#1E40AF' },
+            legend: { display: false },
+            scales: {
+                yAxes: [{ 
+                    scaleLabel: { display: true, labelString: 'จำนวนครั้ง (ครั้ง)' },
+                    ticks: { beginAtZero: true, precision: 0 } 
+                }],
+                xAxes: [{ 
+                    scaleLabel: { display: true, labelString: 'ช่วงเวลา' },
+                    ticks: { maxRotation: 45, minRotation: 45 } 
+                }]
+            },
+            plugins: {
+                datalabels: { align: 'end', anchor: 'end', color: '#000' }
+            }
+        }
+    };
+    return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(chartConfig))}&w=800&h=400&bkg=white`;
+}
+// =====================================================================
+
+
 // ฟังก์ชันรอไฟล์โหลด
 async function waitForFileToDownload(timeout) {
     return new Promise((resolve, reject) => {
@@ -144,28 +211,40 @@ async function processExcelFile(filePath) {
 
         let licensePlateIndex = -1;
         let reportTypeIndex = -1;
+        let dateTimeIndex = -1; // เพิ่มค้นหา Column วันเวลา
 
         headers.forEach((header, index) => {
             if (header) {
                 if (header.includes('ทะเบียน') || header.includes('License') || header.includes('ชื่อรถ')) licensePlateIndex = index;
                 if (header.includes('ชนิด') || header.includes('Type') || header.includes('Alarm') || header.includes('Event')) reportTypeIndex = index;
+                if (header.includes('วัน') || header.includes('เวลา') || header.includes('Time')) dateTimeIndex = index;
             }
         });
 
         if (licensePlateIndex === -1) licensePlateIndex = 1;
         if (reportTypeIndex === -1) reportTypeIndex = 2;
+        if (dateTimeIndex === -1) dateTimeIndex = 3; // Default (ในไฟล์ CSV มักอยู่ Col 3)
 
         const pivotData = {};
         const allTypes = new Set();
+        
+        // NEW: เตรียมตัวแปรเก็บ Time Bins
+        let timeBins = { yawning: {}, closingEyes: {} };
+        timeLabels.forEach(label => {
+            timeBins.yawning[label] = 0;
+            timeBins.closingEyes[label] = 0;
+        });
 
         worksheet.eachRow((row, rowNumber) => {
             if (rowNumber === 1) return; 
 
             const plateCell = row.getCell(licensePlateIndex);
             const typeCell = row.getCell(reportTypeIndex);
+            const dtCell = row.getCell(dateTimeIndex);
             
             const plate = plateCell.value ? plateCell.value.toString() : null;
             const type = typeCell.value ? typeCell.value.toString() : null;
+            const dtStr = dtCell.value ? dtCell.value.toString() : null;
 
             if (plate && type) {
                 if (!pivotData[plate]) pivotData[plate] = {};
@@ -173,6 +252,16 @@ async function processExcelFile(filePath) {
                 
                 pivotData[plate][type]++;
                 allTypes.add(type);
+                
+                // NEW: นับจำนวนลง Time Bins
+                const bin = get30MinBin(dtStr);
+                if (bin && timeLabels.includes(bin)) {
+                    if (type === 'แจ้งเตือนการหาวนอน' || type === 'Yawning') {
+                        timeBins.yawning[bin]++;
+                    } else if (type === 'แจ้งเตือนการหลับตา' || type === 'Closing eyes') {
+                        timeBins.closingEyes[bin]++;
+                    }
+                }
             }
         });
 
@@ -208,17 +297,17 @@ async function processExcelFile(filePath) {
         await workbook.xlsx.writeFile(outputFilePath);
         console.log(`   Excel file processed and saved to: ${outputFilePath}`);
         
-        // Return ทั้ง Path และข้อมูลที่สรุปแล้วเอาไปทำ PDF ต่อ
-        return { filePath: outputFilePath, pivotData: pivotData };
+        // Return ทั้ง Path ข้อมูลที่สรุปแล้ว และ Time Bins เอาไปทำ PDF กราฟต่อ
+        return { filePath: outputFilePath, pivotData: pivotData, timeBins: timeBins };
 
     } catch (error) {
         console.error('   Error processing Excel file:', error.message);
-        return { filePath: filePath, pivotData: {} };
+        return { filePath: filePath, pivotData: {}, timeBins: { yawning: {}, closingEyes: {} } };
     }
 }
 
-// ฟังก์ชันสร้าง PDF (DMS Dashboard)
-async function generatePDFSummary(page, pivotData, dateStr) {
+// ฟังก์ชันสร้าง PDF (DMS Dashboard) - เพิ่ม parameter timeBins
+async function generatePDFSummary(page, pivotData, dateStr, timeBins) {
     console.log('   Generating PDF Summary Report...');
     
     // 1. จัดเตรียมข้อมูล (เรียง Top 10)
@@ -245,6 +334,13 @@ async function generatePDFSummary(page, pivotData, dateStr) {
     const maxYawnCount = top10Yawning.length > 0 ? top10Yawning[0].count : 1;
     const maxSleepCount = top10Sleeping.length > 0 ? top10Sleeping[0].count : 1;
 
+    // NEW: สร้าง URL กราฟ
+    const yawningData = timeLabels.map(label => timeBins.yawning[label] || 0);
+    const closingEyesData = timeLabels.map(label => timeBins.closingEyes[label] || 0);
+    
+    const yawningChartImgUrl = generateChartUrl('yawning', timeLabels, yawningData);
+    const closingEyesChartImgUrl = generateChartUrl('closingEyes', timeLabels, closingEyesData);
+
     // 2. สร้าง HTML (แก้เวลาเป็น Night Shift)
     const html = `
     <!DOCTYPE html>
@@ -255,7 +351,7 @@ async function generatePDFSummary(page, pivotData, dateStr) {
         <style>
         @page { size: A4; margin: 0; }
         body { font-family: 'Noto Sans Thai', sans-serif; margin: 0; padding: 0; background: #fff; color: #333; }
-        .page { width: 210mm; height: 296mm; position: relative; page-break-after: always; overflow: hidden; }
+        .page { width: 210mm; height: 296mm; position: relative; page-break-after: always; overflow: hidden; box-sizing: border-box;}
         .content { padding: 40px; }
         .header-banner { background: #1E40AF; color: white; padding: 15px 40px; font-size: 24px; font-weight: bold; margin-bottom: 30px; }
         h1 { font-size: 32px; color: #1E40AF; margin-bottom: 10px; }
@@ -371,11 +467,24 @@ async function generatePDFSummary(page, pivotData, dateStr) {
             </div>
         </div>
 
+        <!-- NEW Page 4: Charts -->
+        <div class="page">
+            <div class="header-banner">3. กราฟสถิติตามช่วงเวลา</div>
+            <div class="content" style="text-align: center;">
+                <h3 style="margin-top: 10px; color: #1E40AF; text-align: left;">3.1 กราฟแจ้งเตือนการหาวนอน [ราย 30 นาที]</h3>
+                <img src="${yawningChartImgUrl}" alt="Yawning Chart" style="max-width: 100%; border: 1px solid #ddd; padding: 10px; border-radius: 8px;">
+
+                <h3 style="margin-top: 40px; color: #1E40AF; text-align: left;">3.2 กราฟแจ้งเตือนการหลับตา [ราย 30 นาที]</h3>
+                <img src="${closingEyesChartImgUrl}" alt="Closing Eyes Chart" style="max-width: 100%; border: 1px solid #ddd; padding: 10px; border-radius: 8px;">
+            </div>
+        </div>
+
     </body>
     </html>
     `;
 
     // ใช้ page ปัจจุบันวาด HTML ลงไปแล้วสั่งปรินต์เป็น PDF
+    // networkidle0 ช่วยให้โหลดภาพจาก URL QuickChart เสร็จก่อนค่อยแคปหน้าจอ
     await page.setContent(html, { waitUntil: 'networkidle0' });
     const pdfPath = path.join(downloadPath, `DMS_Report_Summary_Night_${dateStr}.pdf`);
     await page.pdf({
@@ -689,10 +798,12 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
         const processResult = await processExcelFile(downloadedFile);
         downloadedFile = processResult.filePath;
         const pivotData = processResult.pivotData;
+        const timeBins = processResult.timeBins; // NEW: รับค่า timeBins ออกมา
 
         // --- NEW STEP: Generate PDF ---
         // ใช้หน้า page หลักของ Puppeteer ในการสร้าง PDF HTML
-        const pdfFilePath = await generatePDFSummary(page, pivotData, todayStr);
+        // NEW: ส่ง timeBins เข้าไปวาดกราฟ
+        const pdfFilePath = await generatePDFSummary(page, pivotData, todayStr, timeBins);
 
         // --- STEP 8: Email ---
         console.log(`8. Sending Email...`);
