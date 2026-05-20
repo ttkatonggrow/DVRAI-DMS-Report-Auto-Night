@@ -13,7 +13,7 @@ const config = {
     emailFrom: process.env.EMAIL_FROM || '',
     emailPass: process.env.EMAIL_PASSWORD || '',
     emailTo: process.env.EMAIL_TO || '',
-    downloadTimeout: 40000
+    downloadTimeout: 120000 // ขยายเวลาเป็น 2 นาที ป้องกันโหลดไฟล์ไม่ทัน
 };
 
 const downloadPath = path.resolve(__dirname, 'downloads');
@@ -24,8 +24,30 @@ if (!fs.existsSync(downloadPath)) {
 }
 
 // =====================================================================
-// NEW: ส่วนที่ 1 ฟังก์ชันจัดกลุ่มเวลาและสร้างกราฟ (Add-on)
+// ส่วนที่ 1: ฟังก์ชันแยกวันที่และกราฟ (Night Shift)
 // =====================================================================
+// ฟังก์ชันดึงค่าเวลาแบบปลอดภัย (ป้องกัน Error ข้อมูลจาก Excel)
+function extractDateAndTime(cellValue) {
+    if (!cellValue) return null;
+    if (cellValue instanceof Date) {
+        return cellValue;
+    }
+    let str = cellValue.toString().trim();
+    
+    // ดักจับ format DD/MM/YYYY HH:mm:ss ถ้าเจอแปลงเป็น YYYY-MM-DD
+    const regex = /^(\d{2})\/(\d{2})\/(\d{4}) (\d{2}:\d{2}:\d{2})$/;
+    const match = str.match(regex);
+    if (match) {
+        str = `${match[3]}-${match[2]}-${match[1]} ${match[4]}`;
+    }
+
+    const d = new Date(str);
+    if (!isNaN(d.getTime())) {
+        return d;
+    }
+    return null;
+}
+
 function get30MinBin(dateTimeStr) {
     if (!dateTimeStr) return null;
     const dateTimeStrStr = dateTimeStr.toString();
@@ -53,7 +75,7 @@ function generateChartUrl(type, labels, data) {
     const title = type === 'yawning' 
         ? 'สถิติแจ้งเตือนการหาวนอน [ราย 30 นาที]' 
         : 'สถิติแจ้งเตือนการหลับตา [ราย 30 นาที]';
-    const color = type === 'yawning' ? 'rgba(245, 158, 11, 0.8)' : 'rgba(220, 38, 38, 0.8)'; // ส้ม(หาว), แดง(หลับ) ให้ตรงกับ Theme ของคุณ
+    const color = type === 'yawning' ? 'rgba(245, 158, 11, 0.8)' : 'rgba(220, 38, 38, 0.8)';
     
     const chartConfig = {
         type: 'bar',
@@ -87,8 +109,6 @@ function generateChartUrl(type, labels, data) {
     };
     return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(chartConfig))}&w=800&h=400&bkg=white`;
 }
-// =====================================================================
-
 
 // ฟังก์ชันรอไฟล์โหลด
 async function waitForFileToDownload(timeout) {
@@ -211,7 +231,7 @@ async function processExcelFile(filePath) {
 
         let licensePlateIndex = -1;
         let reportTypeIndex = -1;
-        let dateTimeIndex = -1; // เพิ่มค้นหา Column วันเวลา
+        let dateTimeIndex = -1;
 
         headers.forEach((header, index) => {
             if (header) {
@@ -223,17 +243,18 @@ async function processExcelFile(filePath) {
 
         if (licensePlateIndex === -1) licensePlateIndex = 1;
         if (reportTypeIndex === -1) reportTypeIndex = 2;
-        if (dateTimeIndex === -1) dateTimeIndex = 3; // Default (ในไฟล์ CSV มักอยู่ Col 3)
+        if (dateTimeIndex === -1) dateTimeIndex = 3;
 
         const pivotData = {};
         const allTypes = new Set();
         
-        // NEW: เตรียมตัวแปรเก็บ Time Bins
         let timeBins = { yawning: {}, closingEyes: {} };
         timeLabels.forEach(label => {
             timeBins.yawning[label] = 0;
             timeBins.closingEyes[label] = 0;
         });
+
+        const yawnLogs = {}; 
 
         worksheet.eachRow((row, rowNumber) => {
             if (rowNumber === 1) return; 
@@ -246,6 +267,9 @@ async function processExcelFile(filePath) {
             const type = typeCell.value ? typeCell.value.toString() : null;
             const dtStr = dtCell.value ? dtCell.value.toString() : null;
 
+            // อ่านเวลาด้วยฟังก์ชันใหม่ที่ปลอดภัยกว่า
+            const parsedDate = extractDateAndTime(dtCell.value);
+
             if (plate && type) {
                 if (!pivotData[plate]) pivotData[plate] = {};
                 if (!pivotData[plate][type]) pivotData[plate][type] = 0;
@@ -253,17 +277,90 @@ async function processExcelFile(filePath) {
                 pivotData[plate][type]++;
                 allTypes.add(type);
                 
-                // NEW: นับจำนวนลง Time Bins
-                const bin = get30MinBin(dtStr);
-                if (bin && timeLabels.includes(bin)) {
-                    if (type === 'แจ้งเตือนการหาวนอน' || type === 'Yawning') {
-                        timeBins.yawning[bin]++;
-                    } else if (type === 'แจ้งเตือนการหลับตา' || type === 'Closing eyes') {
-                        timeBins.closingEyes[bin]++;
+                // นับจำนวนลง Time Bins
+                let bin = null;
+                if (parsedDate) {
+                    const hr = String(parsedDate.getHours()).padStart(2, '0');
+                    const min = parsedDate.getMinutes();
+                    const minBin = min >= 30 ? '30' : '00';
+                    bin = `${hr}:${minBin}`;
+                } else {
+                    // Fallback using simple string manipulation
+                    bin = get30MinBin(dtStr);
+                }
+                
+                if (type === 'แจ้งเตือนการหาวนอน' || type === 'Yawning') {
+                    if (bin && timeLabels.includes(bin)) timeBins.yawning[bin]++;
+                    
+                    if (parsedDate) {
+                        if (!yawnLogs[plate]) yawnLogs[plate] = [];
+                        yawnLogs[plate].push(parsedDate);
                     }
+                } else if (type === 'แจ้งเตือนการหลับตา' || type === 'Closing eyes') {
+                    if (bin && timeLabels.includes(bin)) timeBins.closingEyes[bin]++;
                 }
             }
         });
+
+        // =====================================================================
+        // คำนวณหา "สถิติการหาวต่อเนื่องภายใน 5 นาที" (รวมถึงยอดนับรวม)
+        // =====================================================================
+        const continuousYawnStats = [];
+        for (const plate in yawnLogs) {
+            const times = yawnLogs[plate].sort((a, b) => a - b);
+            
+            let events = [];
+            let currentEvent = null;
+
+            for (const t of times) {
+                if (!currentEvent) {
+                    currentEvent = { start: t, times: [t] };
+                } else {
+                    const diffMins = (t - currentEvent.start) / (1000 * 60);
+                    
+                    if (diffMins <= 5) {
+                        currentEvent.times.push(t);
+                    } else {
+                        if (currentEvent.times.length > 1) { 
+                            events.push({
+                                start: currentEvent.times[0],
+                                end: currentEvent.times[currentEvent.times.length - 1],
+                                count: currentEvent.times.length
+                            });
+                        }
+                        currentEvent = { start: t, times: [t] };
+                    }
+                }
+            }
+            
+            if (currentEvent && currentEvent.times.length > 1) {
+                events.push({
+                    start: currentEvent.times[0],
+                    end: currentEvent.times[currentEvent.times.length - 1],
+                    count: currentEvent.times.length
+                });
+            }
+
+            if (events.length > 0) {
+                // คำนวณหาจำนวนครั้งที่หาวรวมทุก Event
+                const totalYawnCount = events.reduce((sum, e) => sum + e.count, 0);
+                continuousYawnStats.push({
+                    license: plate,
+                    eventCount: events.length,
+                    totalYawnCount: totalYawnCount,
+                    events: events
+                });
+            }
+        }
+
+        // เรียงลำดับ: 1. หาวรวม (มากไปน้อย) -> 2. ถ้าหาวรวมเท่ากัน ให้เรียงตาม Event (มากไปน้อย)
+        continuousYawnStats.sort((a, b) => {
+            if (b.totalYawnCount !== a.totalYawnCount) {
+                return b.totalYawnCount - a.totalYawnCount;
+            }
+            return b.eventCount - a.eventCount;
+        });
+        // =====================================================================
 
         const pivotSheetName = "Summary_Pivot";
         const oldSheet = workbook.getWorksheet(pivotSheetName);
@@ -297,17 +394,22 @@ async function processExcelFile(filePath) {
         await workbook.xlsx.writeFile(outputFilePath);
         console.log(`   Excel file processed and saved to: ${outputFilePath}`);
         
-        // Return ทั้ง Path ข้อมูลที่สรุปแล้ว และ Time Bins เอาไปทำ PDF กราฟต่อ
-        return { filePath: outputFilePath, pivotData: pivotData, timeBins: timeBins };
+        // Return ส่งออกไปให้ PDF
+        return { 
+            filePath: outputFilePath, 
+            pivotData: pivotData, 
+            timeBins: timeBins,
+            continuousYawnStats: continuousYawnStats
+        };
 
     } catch (error) {
         console.error('   Error processing Excel file:', error.message);
-        return { filePath: filePath, pivotData: {}, timeBins: { yawning: {}, closingEyes: {} } };
+        return { filePath: filePath, pivotData: {}, timeBins: { yawning: {}, closingEyes: {} }, continuousYawnStats: [] };
     }
 }
 
-// ฟังก์ชันสร้าง PDF (DMS Dashboard) - เพิ่ม parameter timeBins
-async function generatePDFSummary(page, pivotData, dateStr, timeBins) {
+// ฟังก์ชันสร้าง PDF (DMS Dashboard)
+async function generatePDFSummary(page, pivotData, dateStr, timeBins, continuousYawnStats) {
     console.log('   Generating PDF Summary Report...');
     
     // 1. จัดเตรียมข้อมูล (เรียง Top 10)
@@ -334,14 +436,14 @@ async function generatePDFSummary(page, pivotData, dateStr, timeBins) {
     const maxYawnCount = top10Yawning.length > 0 ? top10Yawning[0].count : 1;
     const maxSleepCount = top10Sleeping.length > 0 ? top10Sleeping[0].count : 1;
 
-    // NEW: สร้าง URL กราฟ
+    // สร้าง URL กราฟ
     const yawningData = timeLabels.map(label => timeBins.yawning[label] || 0);
     const closingEyesData = timeLabels.map(label => timeBins.closingEyes[label] || 0);
     
     const yawningChartImgUrl = generateChartUrl('yawning', timeLabels, yawningData);
     const closingEyesChartImgUrl = generateChartUrl('closingEyes', timeLabels, closingEyesData);
 
-    // 2. สร้าง HTML (แก้เวลาเป็น Night Shift)
+    // 2. สร้าง HTML (เวลาเป็น Night Shift)
     const html = `
     <!DOCTYPE html>
     <html>
@@ -352,6 +454,8 @@ async function generatePDFSummary(page, pivotData, dateStr, timeBins) {
         @page { size: A4; margin: 0; }
         body { font-family: 'Noto Sans Thai', sans-serif; margin: 0; padding: 0; background: #fff; color: #333; }
         .page { width: 210mm; height: 296mm; position: relative; page-break-after: always; overflow: hidden; box-sizing: border-box;}
+        .auto-page { width: 210mm; min-height: 296mm; position: relative; page-break-after: always; box-sizing: border-box; background: #fff; padding-bottom: 40px; }
+        
         .content { padding: 40px; }
         .header-banner { background: #1E40AF; color: white; padding: 15px 40px; font-size: 24px; font-weight: bold; margin-bottom: 30px; }
         h1 { font-size: 32px; color: #1E40AF; margin-bottom: 10px; }
@@ -369,8 +473,8 @@ async function generatePDFSummary(page, pivotData, dateStr, timeBins) {
         .bar-track { flex-grow: 1; background: #F1F5F9; height: 30px; border-radius: 4px; overflow: hidden; }
         .bar-fill { height: 100%; display: flex; align-items: center; justify-content: flex-end; padding-right: 10px; color: white; font-size: 12px; font-weight: bold; }
         table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th { background: #1E40AF; color: white; padding: 12px; text-align: left; font-size: 14px; }
-        td { padding: 10px; border-bottom: 1px solid #E2E8F0; font-size: 14px; }
+        th { background: #1E40AF; color: white; padding: 12px; text-align: left; font-size: 14px; border: 1px solid #1E40AF; }
+        td { padding: 10px; border-bottom: 1px solid #E2E8F0; border-left: 1px solid #E2E8F0; border-right: 1px solid #E2E8F0; font-size: 14px; vertical-align: top; }
         tr:nth-child(even) { background: #F8FAFC; }
         </style>
     </head>
@@ -467,7 +571,7 @@ async function generatePDFSummary(page, pivotData, dateStr, timeBins) {
             </div>
         </div>
 
-        <!-- NEW Page 4: Charts -->
+        <!-- Page 4: Charts -->
         <div class="page">
             <div class="header-banner">3. กราฟสถิติตามช่วงเวลา</div>
             <div class="content" style="text-align: center;">
@@ -479,13 +583,54 @@ async function generatePDFSummary(page, pivotData, dateStr, timeBins) {
             </div>
         </div>
 
+        <!-- Page 5: Continuous Yawning -->
+        <div class="auto-page">
+            <div class="header-banner">4. สถิติการหาวต่อเนื่องภายใน 5 นาที</div>
+            <div class="content" style="padding-top: 0;">
+                <p style="color: #64748B; margin-bottom: 20px; font-size: 14px;">
+                    * เกณฑ์การนับ: มีการแจ้งเตือนหาวนอน <strong>มากกว่า 1 ครั้ง</strong> ภายในช่วงเวลา 5 นาที นับเป็น 1 Event
+                </p>
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width:40px;">No.</th>
+                            <th style="width:160px;">ทะเบียนรถ</th>
+                            <th style="width:100px; text-align:center;">จำนวน (Event)</th>
+                            <th style="width:120px; text-align:center;">หาวรวม (ครั้ง)</th>
+                            <th>รายละเอียดช่วงเวลาที่เกิดเหตุ (Start - End)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${continuousYawnStats.length > 0 ? continuousYawnStats.map((item, idx) => `
+                        <tr>
+                            <td>${idx + 1}</td>
+                            <td><strong>${item.license}</strong></td>
+                            <td style="font-weight: bold; color: #DC2626; text-align:center; vertical-align: middle;">${item.eventCount}</td>
+                            <td style="font-weight: bold; color: #F59E0B; text-align:center; vertical-align: middle;">${item.totalYawnCount}</td>
+                            <td style="font-size: 13px; line-height: 1.6;">
+                                ${item.events.map(e => {
+                                    const pad = (n) => String(n).padStart(2, '0');
+                                    if (e.start && e.start instanceof Date && e.end && e.end instanceof Date) {
+                                        const t1 = `${pad(e.start.getHours())}:${pad(e.start.getMinutes())}:${pad(e.start.getSeconds())}`;
+                                        const t2 = `${pad(e.end.getHours())}:${pad(e.end.getMinutes())}:${pad(e.end.getSeconds())}`;
+                                        return `• ${t1} ถึง ${t2} <span style="color:#DC2626; font-weight:bold;">(${e.count} ครั้ง)</span>`;
+                                    }
+                                    return `• ข้อมูลเวลาขัดข้อง <span style="color:#DC2626; font-weight:bold;">(${e.count} ครั้ง)</span>`;
+                                }).join('<br>')}
+                            </td>
+                        </tr>
+                        `).join('') : '<tr><td colspan="5" style="text-align:center; padding: 20px; color:#888;">ไม่มีประวัติการหาวต่อเนื่องในรอบเวลานี้</td></tr>'}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
     </body>
     </html>
     `;
 
     // ใช้ page ปัจจุบันวาด HTML ลงไปแล้วสั่งปรินต์เป็น PDF
-    // networkidle0 ช่วยให้โหลดภาพจาก URL QuickChart เสร็จก่อนค่อยแคปหน้าจอ
-    await page.setContent(html, { waitUntil: 'networkidle0' });
+    await page.setContent(html, { waitUntil: 'networkidle0', timeout: 60000 });
     const pdfPath = path.join(downloadPath, `DMS_Report_Summary_Night_${dateStr}.pdf`);
     await page.pdf({
         path: pdfPath,
@@ -555,7 +700,7 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
     }
 
     const browser = await puppeteer.launch({
-        headless: "new",
+        headless: true, // ป้องกัน Warning
         ignoreHTTPSErrors: true, 
         args: [
             '--no-sandbox', 
@@ -741,12 +886,20 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
         await reportPage.keyboard.press('Escape');
 
         // --- Date Inputs (Night Shift Logic) ---
-        const todayObj = new Date();
-        const yesterdayObj = new Date(todayObj);
-        yesterdayObj.setDate(yesterdayObj.getDate() - 1);
+        // NEW: Fix Timezone ให้เป็นเวลาประเทศไทย (GMT+7) เสมอ
+        const thaiDateObj = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
+        const yyyy = thaiDateObj.getFullYear();
+        const mm = String(thaiDateObj.getMonth() + 1).padStart(2, '0');
+        const dd = String(thaiDateObj.getDate()).padStart(2, '0');
+        const todayStr = `${yyyy}-${mm}-${dd}`;
 
-        const todayStr = todayObj.toISOString().slice(0, 10);
-        const yesterdayStr = yesterdayObj.toISOString().slice(0, 10);
+        // สำหรับกะดึก ต้องดึงข้อมูลของ "เมื่อวาน" เริ่ม 18:00
+        const yesterdayObj = new Date(thaiDateObj);
+        yesterdayObj.setDate(yesterdayObj.getDate() - 1);
+        const y_yyyy = yesterdayObj.getFullYear();
+        const y_mm = String(yesterdayObj.getMonth() + 1).padStart(2, '0');
+        const y_dd = String(yesterdayObj.getDate()).padStart(2, '0');
+        const yesterdayStr = `${y_yyyy}-${y_mm}-${y_dd}`;
 
         // ดึงข้อมูล 18:00 ของเมื่อวาน ถึง 06:00 ของวันนี้
         const startDateTime = `${yesterdayStr} 18:00:00`;
@@ -798,18 +951,18 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
         const processResult = await processExcelFile(downloadedFile);
         downloadedFile = processResult.filePath;
         const pivotData = processResult.pivotData;
-        const timeBins = processResult.timeBins; // NEW: รับค่า timeBins ออกมา
+        const timeBins = processResult.timeBins;
+        const continuousYawnStats = processResult.continuousYawnStats;
 
         // --- NEW STEP: Generate PDF ---
         // ใช้หน้า page หลักของ Puppeteer ในการสร้าง PDF HTML
-        // NEW: ส่ง timeBins เข้าไปวาดกราฟ
-        const pdfFilePath = await generatePDFSummary(page, pivotData, todayStr, timeBins);
+        const pdfFilePath = await generatePDFSummary(page, pivotData, todayStr, timeBins, continuousYawnStats);
 
         // --- STEP 8: Email ---
         console.log(`8. Sending Email...`);
         await sendEmail(
             `THAI TRACKING DMS REPORT: ${todayStr} (Night Shift)`, 
-            `ถึง ผู้เกี่ยวข้อง\nรายงาน THAI TRACKING DMS REPORT รอบ 18:00 ถึง 06:00 น. และ สรุปกราฟ PDF Top 10\nด้วยความนับถือ\nBOT REPORT`, 
+            `ถึง ผู้เกี่ยวข้อง\nรายงาน THAI TRACKING DMS REPORT รอบ 18:00 ถึง 06:00 น. และ สรุปกราฟ PDF\nด้วยความนับถือ\nBOT REPORT`, 
             [downloadedFile, pdfFilePath] // แนบไป 2 ไฟล์
         );
 
