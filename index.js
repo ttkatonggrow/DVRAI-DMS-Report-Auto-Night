@@ -15,7 +15,7 @@ const config = {
     emailPass: process.env.EMAIL_PASSWORD || '',
     emailTo: process.env.EMAIL_TO || '',
     downloadTimeout: 120000, // 2 minutes
-    googleSheetId: '1cpG-WQZ63Ntg15-YbaJZRCpD-Qo3sjdyLkU6Fl2uZDc',
+    googleSheetId: '1-D9J36mYKE7vldyowMPl-xXLlVU8orBpUYS5d1OjSrE',
     googleSheetTabName: 'YAWNING_BEHAVIOR_DASHBOARD' // เปลี่ยนชื่อให้ตรงกับชื่อแท็บ (Sheet) ของคุณที่ด้านล่างสุดของเว็บ
 };
 
@@ -116,6 +116,31 @@ function formatSheet(worksheet) {
     });
 }
 
+// -------------------------------------------------------------
+// NEW: ตัวช่วยแปลงวันที่ (แก้ปัญหา Excel Serial Date 46180.878)
+// -------------------------------------------------------------
+function formatExcelDate(value) {
+    let d;
+    if (value instanceof Date) {
+        d = value;
+    } else if (typeof value === 'number' && value > 40000 && value < 60000) {
+        // สูตรคำนวณวันจาก Excel Serial Number (นับจากปี 1900)
+        d = new Date((value - (25567 + 2)) * 86400 * 1000);
+        d = new Date(d.getTime() + (d.getTimezoneOffset() * 60000));
+    } else {
+        return null;
+    }
+
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const hours = String(d.getHours()).padStart(2, '0');
+    const minutes = String(d.getMinutes()).padStart(2, '0');
+    const seconds = String(d.getSeconds()).padStart(2, '0');
+    
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+}
+
 // ฟังก์ชันทำ Pivot และแยกข้อมูล Raw Data
 async function processExcelFile(filePath) {
     try {
@@ -168,28 +193,19 @@ async function processExcelFile(filePath) {
             const reportType = typeCell.text ? typeCell.text.trim() : '';
             
             // เช็คเงื่อนไข: ดึงเฉพาะที่มีชนิดรายงานเป็น "แจ้งเตือนการหาวนอน" (หรือมีคำนี้อยู่)
-            // ใช้ .includes() เผื่อมีช่องว่างหรืออักขระพิเศษติดมาด้วย
             if (reportType.includes('แจ้งเตือนการหาวนอน') || reportType.includes('Yawning')) {
                 const rowData = [];
                 for (let c = 1; c <= colCount; c++) {
                     const cell = row.getCell(c);
                     let textVal = '';
 
-                    // ตรวจสอบว่าค่าในเซลล์เป็น Date Object จาก Excel หรือไม่
-                    if (cell.value instanceof Date) {
-                        const d = cell.value;
-                        const year = d.getFullYear();
-                        const month = String(d.getMonth() + 1).padStart(2, '0');
-                        const day = String(d.getDate()).padStart(2, '0');
-                        const hours = String(d.getHours()).padStart(2, '0');
-                        const minutes = String(d.getMinutes()).padStart(2, '0');
-                        const seconds = String(d.getSeconds()).padStart(2, '0');
-                        
-                        // บังคับจัดรูปแบบเป็น YYYY-MM-DD HH:mm:ss
-                        textVal = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+                    // ใช้ฟังก์ชันแปลงวันที่ที่เราสร้างไว้ด้านบน
+                    const formattedDate = formatExcelDate(cell.value);
+                    
+                    if (formattedDate) {
+                        textVal = formattedDate; // ได้วันที่ออกมาสวยงาม
                     } else {
-                        // ถ้าไม่ใช่ Date ให้ดึงข้อความตามปกติ
-                        textVal = cell.text ? cell.text.trim() : '';
+                        textVal = cell.text ? cell.text.trim() : ''; // ถ้าเป็นข้อความทั่วไป
                     }
                     
                     rowData.push(textVal);
@@ -701,15 +717,20 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
         await selectOption('แจ้งเตือนการหลับตา');
         await reportPage.keyboard.press('Escape');
 
-        // --- Date Inputs (Night Shift Logic) ---
-        const todayObj = new Date();
-        const yesterdayObj = new Date(todayObj);
+        // NEW: Night Shift Logic (18:00 Yesterday - 06:00 Today) + Timezone Asia/Bangkok
+        const thaiDateObj = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
+        const yyyy = thaiDateObj.getFullYear();
+        const mm = String(thaiDateObj.getMonth() + 1).padStart(2, '0');
+        const dd = String(thaiDateObj.getDate()).padStart(2, '0');
+        const todayStr = `${yyyy}-${mm}-${dd}`;
+
+        const yesterdayObj = new Date(thaiDateObj);
         yesterdayObj.setDate(yesterdayObj.getDate() - 1);
+        const y_yyyy = yesterdayObj.getFullYear();
+        const y_mm = String(yesterdayObj.getMonth() + 1).padStart(2, '0');
+        const y_dd = String(yesterdayObj.getDate()).padStart(2, '0');
+        const yesterdayStr = `${y_yyyy}-${y_mm}-${y_dd}`;
 
-        const todayStr = todayObj.toISOString().slice(0, 10);
-        const yesterdayStr = yesterdayObj.toISOString().slice(0, 10);
-
-        // ดึงข้อมูล 18:00 ของเมื่อวาน ถึง 06:00 ของวันนี้
         const startDateTime = `${yesterdayStr} 18:00:00`;
         const endDateTime = `${todayStr} 06:00:00`;
         
