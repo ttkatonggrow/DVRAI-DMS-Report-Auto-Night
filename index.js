@@ -4,7 +4,8 @@ const nodemailer = require('nodemailer');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const ExcelJS = require('exceljs'); 
+const ExcelJS = require('exceljs');
+const { google } = require('googleapis');
 
 // --- CONFIGURATION ---
 const config = {
@@ -13,7 +14,9 @@ const config = {
     emailFrom: process.env.EMAIL_FROM || '',
     emailPass: process.env.EMAIL_PASSWORD || '',
     emailTo: process.env.EMAIL_TO || '',
-    downloadTimeout: 120000 // ขยายเวลาเป็น 2 นาที ป้องกันโหลดไฟล์ไม่ทัน
+    downloadTimeout: 120000, // 2 minutes
+    googleSheetId: '1cpG-WQZ63Ntg15-YbaJZRCpD-Qo3sjdyLkU6Fl2uZDc',
+    googleSheetTabName: 'YAWNING_BEHAVIOR_DASHBOARD' // เปลี่ยนชื่อให้ตรงกับชื่อแท็บ (Sheet) ของคุณที่ด้านล่างสุดของเว็บ
 };
 
 const downloadPath = path.resolve(__dirname, 'downloads');
@@ -21,93 +24,6 @@ const defaultDownloadPath = path.join(os.homedir(), 'Downloads');
 
 if (!fs.existsSync(downloadPath)) {
     fs.mkdirSync(downloadPath);
-}
-
-// =====================================================================
-// ส่วนที่ 1: ฟังก์ชันแยกวันที่และกราฟ (Night Shift)
-// =====================================================================
-// ฟังก์ชันดึงค่าเวลาแบบปลอดภัย (ป้องกัน Error ข้อมูลจาก Excel)
-function extractDateAndTime(cellValue) {
-    if (!cellValue) return null;
-    if (cellValue instanceof Date) {
-        return cellValue;
-    }
-    let str = cellValue.toString().trim();
-    
-    // ดักจับ format DD/MM/YYYY HH:mm:ss ถ้าเจอแปลงเป็น YYYY-MM-DD
-    const regex = /^(\d{2})\/(\d{2})\/(\d{4}) (\d{2}:\d{2}:\d{2})$/;
-    const match = str.match(regex);
-    if (match) {
-        str = `${match[3]}-${match[2]}-${match[1]} ${match[4]}`;
-    }
-
-    const d = new Date(str);
-    if (!isNaN(d.getTime())) {
-        return d;
-    }
-    return null;
-}
-
-function get30MinBin(dateTimeStr) {
-    if (!dateTimeStr) return null;
-    const dateTimeStrStr = dateTimeStr.toString();
-    const parts = dateTimeStrStr.split(' ');
-    if (parts.length < 2) return null; 
-    
-    const timePart = parts[1]; 
-    const timeParts = timePart.split(':');
-    if (timeParts.length < 2) return null;
-    
-    const hr = timeParts[0];
-    const min = timeParts[1];
-    const minBin = parseInt(min) >= 30 ? '30' : '00';
-    return `${hr}:${minBin}`;
-}
-
-const timeLabels = [
-    "18:00", "18:30", "19:00", "19:30", "20:00", "20:30",
-    "21:00", "21:30", "22:00", "22:30", "23:00", "23:30",
-    "00:00", "00:30", "01:00", "01:30", "02:00", "02:30",
-    "03:00", "03:30", "04:00", "04:30", "05:00", "05:30"
-];
-
-function generateChartUrl(type, labels, data) {
-    const title = type === 'yawning' 
-        ? 'สถิติแจ้งเตือนการหาวนอน [ราย 30 นาที]' 
-        : 'สถิติแจ้งเตือนการหลับตา [ราย 30 นาที]';
-    const color = type === 'yawning' ? 'rgba(245, 158, 11, 0.8)' : 'rgba(220, 38, 38, 0.8)';
-    
-    const chartConfig = {
-        type: 'bar',
-        data: {
-            labels: labels,
-            datasets: [{
-                label: 'จำนวนครั้ง',
-                data: data,
-                backgroundColor: color,
-                borderColor: color.replace('0.8', '1'),
-                borderWidth: 1
-            }]
-        },
-        options: {
-            title: { display: true, text: title, fontSize: 18, fontColor: '#1E40AF' },
-            legend: { display: false },
-            scales: {
-                yAxes: [{ 
-                    scaleLabel: { display: true, labelString: 'จำนวนครั้ง (ครั้ง)' },
-                    ticks: { beginAtZero: true, precision: 0 } 
-                }],
-                xAxes: [{ 
-                    scaleLabel: { display: true, labelString: 'ช่วงเวลา' },
-                    ticks: { maxRotation: 45, minRotation: 45 } 
-                }]
-            },
-            plugins: {
-                datalabels: { align: 'end', anchor: 'end', color: '#000' }
-            }
-        }
-    };
-    return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(chartConfig))}&w=800&h=400&bkg=white`;
 }
 
 // ฟังก์ชันรอไฟล์โหลด
@@ -163,7 +79,7 @@ async function waitForFileToDownload(timeout) {
                                 console.log(`      File still downloading (${size1} -> ${size2})...`);
                             }
                         }
-                    }, 5000); // รอ 5 วิให้ไฟล์นิ่ง
+                    }, 5000); 
                     return;
                 }
             }
@@ -183,7 +99,7 @@ function formatSheet(worksheet) {
         let maxLength = 0;
         if (column && column.eachCell) {
             column.eachCell({ includeEmpty: true }, function(cell) {
-                const columnLength = cell.value ? cell.value.toString().length : 10;
+                const columnLength = cell.text ? cell.text.length : 10;
                 if (columnLength > maxLength) maxLength = columnLength;
                 cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
             });
@@ -200,7 +116,7 @@ function formatSheet(worksheet) {
     });
 }
 
-// ฟังก์ชันทำ Pivot
+// ฟังก์ชันทำ Pivot และแยกข้อมูล Raw Data
 async function processExcelFile(filePath) {
     try {
         console.log(`   Processing Excel file (with exceljs): ${filePath}`);
@@ -218,11 +134,9 @@ async function processExcelFile(filePath) {
         const worksheet = workbook.worksheets[0]; 
         if (!worksheet) {
             console.warn('   No worksheet found.');
-            return { filePath, pivotData: {} };
+            return { filePath, pivotData: {}, rawData: [] };
         }
         
-        formatSheet(worksheet);
-
         const firstRow = worksheet.getRow(1);
         const headers = [];
         firstRow.eachCell((cell, colNumber) => {
@@ -231,44 +145,55 @@ async function processExcelFile(filePath) {
 
         let licensePlateIndex = -1;
         let reportTypeIndex = -1;
-        let dateTimeIndex = -1;
 
         headers.forEach((header, index) => {
             if (header) {
                 if (header.includes('ทะเบียน') || header.includes('License') || header.includes('ชื่อรถ')) licensePlateIndex = index;
                 if (header.includes('ชนิด') || header.includes('Type') || header.includes('Alarm') || header.includes('Event')) reportTypeIndex = index;
-                if (header.includes('วัน') || header.includes('เวลา') || header.includes('Time')) dateTimeIndex = index;
             }
         });
 
         if (licensePlateIndex === -1) licensePlateIndex = 1;
-        if (reportTypeIndex === -1) reportTypeIndex = 2;
-        if (dateTimeIndex === -1) dateTimeIndex = 3;
+        if (reportTypeIndex === -1) reportTypeIndex = 2; // Column B ใน Excel (Index 2 ใน exceljs)
+
+        // --- ดึงข้อมูล Raw Data เพื่อเอาไปใส่ Google Sheets ---
+        const rawDataToUpload = [];
+        const colCount = worksheet.columnCount;
+        
+        worksheet.eachRow((row, rowNumber) => {
+            if (rowNumber === 1) return; // ข้าม Header (บรรทัดแรก)
+            
+            // อ่านค่าในคอลัมน์ชนิดรายงาน (คอลัมน์ B คือ index 2)
+            const typeCell = row.getCell(reportTypeIndex);
+            const reportType = typeCell.text ? typeCell.text.trim() : '';
+            
+            // เช็คเงื่อนไข: ดึงเฉพาะที่มีชนิดรายงานเป็น "แจ้งเตือนการหาวนอน" (หรือมีคำนี้อยู่)
+            // ใช้ .includes() เผื่อมีช่องว่างหรืออักขระพิเศษติดมาด้วย
+            if (reportType.includes('แจ้งเตือนการหาวนอน') || reportType.includes('Yawning')) {
+                const rowData = [];
+                for (let c = 1; c <= colCount; c++) {
+                    const cell = row.getCell(c);
+                    const textVal = cell.text ? cell.text.trim() : '';
+                    rowData.push(textVal);
+                }
+                rawDataToUpload.push(rowData);
+            }
+        });
+        // ------------------------------------------------
+
+        formatSheet(worksheet);
 
         const pivotData = {};
         const allTypes = new Set();
-        
-        let timeBins = { yawning: {}, closingEyes: {} };
-        timeLabels.forEach(label => {
-            timeBins.yawning[label] = 0;
-            timeBins.closingEyes[label] = 0;
-        });
-
-        const yawnLogs = {}; 
 
         worksheet.eachRow((row, rowNumber) => {
             if (rowNumber === 1) return; 
 
             const plateCell = row.getCell(licensePlateIndex);
             const typeCell = row.getCell(reportTypeIndex);
-            const dtCell = row.getCell(dateTimeIndex);
             
             const plate = plateCell.value ? plateCell.value.toString() : null;
             const type = typeCell.value ? typeCell.value.toString() : null;
-            const dtStr = dtCell.value ? dtCell.value.toString() : null;
-
-            // อ่านเวลาด้วยฟังก์ชันใหม่ที่ปลอดภัยกว่า
-            const parsedDate = extractDateAndTime(dtCell.value);
 
             if (plate && type) {
                 if (!pivotData[plate]) pivotData[plate] = {};
@@ -276,91 +201,8 @@ async function processExcelFile(filePath) {
                 
                 pivotData[plate][type]++;
                 allTypes.add(type);
-                
-                // นับจำนวนลง Time Bins
-                let bin = null;
-                if (parsedDate) {
-                    const hr = String(parsedDate.getHours()).padStart(2, '0');
-                    const min = parsedDate.getMinutes();
-                    const minBin = min >= 30 ? '30' : '00';
-                    bin = `${hr}:${minBin}`;
-                } else {
-                    // Fallback using simple string manipulation
-                    bin = get30MinBin(dtStr);
-                }
-                
-                if (type === 'แจ้งเตือนการหาวนอน' || type === 'Yawning') {
-                    if (bin && timeLabels.includes(bin)) timeBins.yawning[bin]++;
-                    
-                    if (parsedDate) {
-                        if (!yawnLogs[plate]) yawnLogs[plate] = [];
-                        yawnLogs[plate].push(parsedDate);
-                    }
-                } else if (type === 'แจ้งเตือนการหลับตา' || type === 'Closing eyes') {
-                    if (bin && timeLabels.includes(bin)) timeBins.closingEyes[bin]++;
-                }
             }
         });
-
-        // =====================================================================
-        // คำนวณหา "สถิติการหาวต่อเนื่องภายใน 5 นาที" (รวมถึงยอดนับรวม)
-        // =====================================================================
-        const continuousYawnStats = [];
-        for (const plate in yawnLogs) {
-            const times = yawnLogs[plate].sort((a, b) => a - b);
-            
-            let events = [];
-            let currentEvent = null;
-
-            for (const t of times) {
-                if (!currentEvent) {
-                    currentEvent = { start: t, times: [t] };
-                } else {
-                    const diffMins = (t - currentEvent.start) / (1000 * 60);
-                    
-                    if (diffMins <= 5) {
-                        currentEvent.times.push(t);
-                    } else {
-                        if (currentEvent.times.length > 1) { 
-                            events.push({
-                                start: currentEvent.times[0],
-                                end: currentEvent.times[currentEvent.times.length - 1],
-                                count: currentEvent.times.length
-                            });
-                        }
-                        currentEvent = { start: t, times: [t] };
-                    }
-                }
-            }
-            
-            if (currentEvent && currentEvent.times.length > 1) {
-                events.push({
-                    start: currentEvent.times[0],
-                    end: currentEvent.times[currentEvent.times.length - 1],
-                    count: currentEvent.times.length
-                });
-            }
-
-            if (events.length > 0) {
-                // คำนวณหาจำนวนครั้งที่หาวรวมทุก Event
-                const totalYawnCount = events.reduce((sum, e) => sum + e.count, 0);
-                continuousYawnStats.push({
-                    license: plate,
-                    eventCount: events.length,
-                    totalYawnCount: totalYawnCount,
-                    events: events
-                });
-            }
-        }
-
-        // เรียงลำดับ: 1. หาวรวม (มากไปน้อย) -> 2. ถ้าหาวรวมเท่ากัน ให้เรียงตาม Event (มากไปน้อย)
-        continuousYawnStats.sort((a, b) => {
-            if (b.totalYawnCount !== a.totalYawnCount) {
-                return b.totalYawnCount - a.totalYawnCount;
-            }
-            return b.eventCount - a.eventCount;
-        });
-        // =====================================================================
 
         const pivotSheetName = "Summary_Pivot";
         const oldSheet = workbook.getWorksheet(pivotSheetName);
@@ -393,26 +235,20 @@ async function processExcelFile(filePath) {
         
         await workbook.xlsx.writeFile(outputFilePath);
         console.log(`   Excel file processed and saved to: ${outputFilePath}`);
+        console.log(`   Filtered ${rawDataToUpload.length} rows of 'แจ้งเตือนการหาวนอน' for Google Sheets.`);
         
-        // Return ส่งออกไปให้ PDF
-        return { 
-            filePath: outputFilePath, 
-            pivotData: pivotData, 
-            timeBins: timeBins,
-            continuousYawnStats: continuousYawnStats
-        };
+        return { filePath: outputFilePath, pivotData: pivotData, rawData: rawDataToUpload };
 
     } catch (error) {
         console.error('   Error processing Excel file:', error.message);
-        return { filePath: filePath, pivotData: {}, timeBins: { yawning: {}, closingEyes: {} }, continuousYawnStats: [] };
+        return { filePath: filePath, pivotData: {}, rawData: [] };
     }
 }
 
 // ฟังก์ชันสร้าง PDF (DMS Dashboard)
-async function generatePDFSummary(page, pivotData, dateStr, timeBins, continuousYawnStats) {
+async function generatePDFSummary(page, pivotData, dateStr) {
     console.log('   Generating PDF Summary Report...');
     
-    // 1. จัดเตรียมข้อมูล (เรียง Top 10)
     let yawningStats = [];
     let sleepingStats = [];
     let totalYawning = 0;
@@ -426,7 +262,6 @@ async function generatePDFSummary(page, pivotData, dateStr, timeBins, continuous
         if (sleep > 0) { sleepingStats.push({ license, count: sleep }); totalSleeping += sleep; }
     }
 
-    // เรียงจากมากไปน้อย
     yawningStats.sort((a, b) => b.count - a.count);
     sleepingStats.sort((a, b) => b.count - a.count);
 
@@ -436,14 +271,6 @@ async function generatePDFSummary(page, pivotData, dateStr, timeBins, continuous
     const maxYawnCount = top10Yawning.length > 0 ? top10Yawning[0].count : 1;
     const maxSleepCount = top10Sleeping.length > 0 ? top10Sleeping[0].count : 1;
 
-    // สร้าง URL กราฟ
-    const yawningData = timeLabels.map(label => timeBins.yawning[label] || 0);
-    const closingEyesData = timeLabels.map(label => timeBins.closingEyes[label] || 0);
-    
-    const yawningChartImgUrl = generateChartUrl('yawning', timeLabels, yawningData);
-    const closingEyesChartImgUrl = generateChartUrl('closingEyes', timeLabels, closingEyesData);
-
-    // 2. สร้าง HTML (เวลาเป็น Night Shift)
     const html = `
     <!DOCTYPE html>
     <html>
@@ -453,9 +280,7 @@ async function generatePDFSummary(page, pivotData, dateStr, timeBins, continuous
         <style>
         @page { size: A4; margin: 0; }
         body { font-family: 'Noto Sans Thai', sans-serif; margin: 0; padding: 0; background: #fff; color: #333; }
-        .page { width: 210mm; height: 296mm; position: relative; page-break-after: always; overflow: hidden; box-sizing: border-box;}
-        .auto-page { width: 210mm; min-height: 296mm; position: relative; page-break-after: always; box-sizing: border-box; background: #fff; padding-bottom: 40px; }
-        
+        .page { width: 210mm; height: 296mm; position: relative; page-break-after: always; overflow: hidden; }
         .content { padding: 40px; }
         .header-banner { background: #1E40AF; color: white; padding: 15px 40px; font-size: 24px; font-weight: bold; margin-bottom: 30px; }
         h1 { font-size: 32px; color: #1E40AF; margin-bottom: 10px; }
@@ -473,8 +298,8 @@ async function generatePDFSummary(page, pivotData, dateStr, timeBins, continuous
         .bar-track { flex-grow: 1; background: #F1F5F9; height: 30px; border-radius: 4px; overflow: hidden; }
         .bar-fill { height: 100%; display: flex; align-items: center; justify-content: flex-end; padding-right: 10px; color: white; font-size: 12px; font-weight: bold; }
         table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th { background: #1E40AF; color: white; padding: 12px; text-align: left; font-size: 14px; border: 1px solid #1E40AF; }
-        td { padding: 10px; border-bottom: 1px solid #E2E8F0; border-left: 1px solid #E2E8F0; border-right: 1px solid #E2E8F0; font-size: 14px; vertical-align: top; }
+        th { background: #1E40AF; color: white; padding: 12px; text-align: left; font-size: 14px; }
+        td { padding: 10px; border-bottom: 1px solid #E2E8F0; font-size: 14px; }
         tr:nth-child(even) { background: #F8FAFC; }
         </style>
     </head>
@@ -571,77 +396,54 @@ async function generatePDFSummary(page, pivotData, dateStr, timeBins, continuous
             </div>
         </div>
 
-        <!-- Page 4: Charts -->
-        <div class="page">
-            <div class="header-banner">3. กราฟสถิติตามช่วงเวลา</div>
-            <div class="content" style="text-align: center;">
-                <h3 style="margin-top: 10px; color: #1E40AF; text-align: left;">3.1 กราฟแจ้งเตือนการหาวนอน [ราย 30 นาที]</h3>
-                <img src="${yawningChartImgUrl}" alt="Yawning Chart" style="max-width: 100%; border: 1px solid #ddd; padding: 10px; border-radius: 8px;">
-
-                <h3 style="margin-top: 40px; color: #1E40AF; text-align: left;">3.2 กราฟแจ้งเตือนการหลับตา [ราย 30 นาที]</h3>
-                <img src="${closingEyesChartImgUrl}" alt="Closing Eyes Chart" style="max-width: 100%; border: 1px solid #ddd; padding: 10px; border-radius: 8px;">
-            </div>
-        </div>
-
-        <!-- Page 5: Continuous Yawning -->
-        <div class="auto-page">
-            <div class="header-banner">4. สถิติการหาวต่อเนื่องภายใน 5 นาที</div>
-            <div class="content" style="padding-top: 0;">
-                <p style="color: #64748B; margin-bottom: 20px; font-size: 14px;">
-                    * เกณฑ์การนับ: มีการแจ้งเตือนหาวนอน <strong>มากกว่า 1 ครั้ง</strong> ภายในช่วงเวลา 5 นาที นับเป็น 1 Event
-                </p>
-                <table>
-                    <thead>
-                        <tr>
-                            <th style="width:40px;">No.</th>
-                            <th style="width:160px;">ทะเบียนรถ</th>
-                            <th style="width:100px; text-align:center;">จำนวน (Event)</th>
-                            <th style="width:120px; text-align:center;">หาวรวม (ครั้ง)</th>
-                            <th>รายละเอียดช่วงเวลาที่เกิดเหตุ (Start - End)</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${continuousYawnStats.length > 0 ? continuousYawnStats.map((item, idx) => `
-                        <tr>
-                            <td>${idx + 1}</td>
-                            <td><strong>${item.license}</strong></td>
-                            <td style="font-weight: bold; color: #DC2626; text-align:center; vertical-align: middle;">${item.eventCount}</td>
-                            <td style="font-weight: bold; color: #F59E0B; text-align:center; vertical-align: middle;">${item.totalYawnCount}</td>
-                            <td style="font-size: 13px; line-height: 1.6;">
-                                ${item.events.map(e => {
-                                    const pad = (n) => String(n).padStart(2, '0');
-                                    if (e.start && e.start instanceof Date && e.end && e.end instanceof Date) {
-                                        const t1 = `${pad(e.start.getHours())}:${pad(e.start.getMinutes())}:${pad(e.start.getSeconds())}`;
-                                        const t2 = `${pad(e.end.getHours())}:${pad(e.end.getMinutes())}:${pad(e.end.getSeconds())}`;
-                                        return `• ${t1} ถึง ${t2} <span style="color:#DC2626; font-weight:bold;">(${e.count} ครั้ง)</span>`;
-                                    }
-                                    return `• ข้อมูลเวลาขัดข้อง <span style="color:#DC2626; font-weight:bold;">(${e.count} ครั้ง)</span>`;
-                                }).join('<br>')}
-                            </td>
-                        </tr>
-                        `).join('') : '<tr><td colspan="5" style="text-align:center; padding: 20px; color:#888;">ไม่มีประวัติการหาวต่อเนื่องในรอบเวลานี้</td></tr>'}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
     </body>
     </html>
     `;
 
-    // ใช้ page ปัจจุบันวาด HTML ลงไปแล้วสั่งปรินต์เป็น PDF
-    await page.setContent(html, { waitUntil: 'networkidle0', timeout: 60000 });
+    await page.setContent(html, { waitUntil: 'networkidle0' });
     const pdfPath = path.join(downloadPath, `DMS_Report_Summary_Night_${dateStr}.pdf`);
-    await page.pdf({
-        path: pdfPath,
-        format: 'A4',
-        printBackground: true
-    });
+    await page.pdf({ path: pdfPath, format: 'A4', printBackground: true });
     console.log(`   ✅ PDF Generated successfully: ${pdfPath}`);
     return pdfPath;
 }
 
-// ฟังก์ชันส่งอีเมล (รองรับหลายไฟล์)
+// ฟังก์ชันอัปโหลดข้อมูลไปยัง Google Sheets
+async function appendToGoogleSheet(dataToAppend) {
+    console.log(`   Uploading ${dataToAppend.length} rows to Google Sheets...`);
+    try {
+        const credentialsStr = process.env.GOOGLE_CREDENTIALS;
+        if (!credentialsStr) {
+            console.warn('   ⚠️ Skipping Google Sheets upload: GOOGLE_CREDENTIALS not found in secrets.');
+            return;
+        }
+
+        const credentials = JSON.parse(credentialsStr);
+        const auth = new google.auth.GoogleAuth({
+            credentials,
+            scopes: ['https://www.googleapis.com/auth/spreadsheets']
+        });
+
+        const sheets = google.sheets({ version: 'v4', auth });
+        
+        // กำหนดช่วง (Range) เช่น 'Sheet1!A:Z'
+        const range = `${config.googleSheetTabName}!A:Z`;
+
+        await sheets.spreadsheets.values.append({
+            spreadsheetId: config.googleSheetId,
+            range: range,
+            valueInputOption: 'USER_ENTERED',
+            insertDataOption: 'INSERT_ROWS',
+            requestBody: {
+                values: dataToAppend
+            }
+        });
+        console.log(`   ✅ Successfully appended to Google Sheets.`);
+    } catch (error) {
+        console.error('   ❌ Failed to upload to Google Sheets:', error.message);
+    }
+}
+
+// ฟังก์ชันส่งอีเมล
 async function sendEmail(subject, message, attachmentPaths = []) {
     if (!config.emailFrom || !config.emailPass) {
         console.log('Skipping email: No credentials provided.');
@@ -653,7 +455,6 @@ async function sendEmail(subject, message, attachmentPaths = []) {
         auth: { user: config.emailFrom, pass: config.emailPass }
     });
 
-    // วนลูปไฟล์แนบ
     const attachments = attachmentPaths.filter(p => p && fs.existsSync(p)).map(p => ({
         filename: path.basename(p), 
         path: p
@@ -692,7 +493,6 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
 }
 
 (async () => {
-    // ระบุให้ชัดเจนใน Log ว่าเป็น Night Shift
     console.log(`--- Started GPS Report Automation (Night Shift) [${new Date().toLocaleString()}] ---`);
     
     if (!config.gpsUser || !config.gpsPass) {
@@ -700,7 +500,7 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
     }
 
     const browser = await puppeteer.launch({
-        headless: true, // ป้องกัน Warning
+        headless: "new",
         ignoreHTTPSErrors: true, 
         args: [
             '--no-sandbox', 
@@ -738,7 +538,7 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
     try {
         const context = browser.defaultBrowserContext();
         await context.overridePermissions('http://cctvwli.com:3001', ['automatic-downloads']);
-    } catch(e) {}
+    } catch(e) { console.log('   Warning: Permission override failed:', e.message); }
 
     page.setDefaultTimeout(60000);
 
@@ -834,7 +634,6 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
         console.log('6. Configuring Report Filters...');
         let dmsClicked = false;
         
-        // 1. เพิ่ม Fallback ค้นหาปุ่มด้วย XPath (แม่นยำกว่า)
         const dmsSelectors = [
             '//*[local-name()="svg" and @data-testid="FaceIcon"]/..', 
             '//*[@id="root"]/div/div[2]/div[1]/div/button[2]', 
@@ -855,7 +654,6 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
             } catch (e) {}
         }
 
-        // 2. ถ้าหาไม่เจอจริงๆ ค่อยใช้ JS Fallback
         if (!dmsClicked) {
             try {
                 dmsClicked = await reportPage.evaluate(() => {
@@ -886,20 +684,12 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
         await reportPage.keyboard.press('Escape');
 
         // --- Date Inputs (Night Shift Logic) ---
-        // NEW: Fix Timezone ให้เป็นเวลาประเทศไทย (GMT+7) เสมอ
-        const thaiDateObj = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
-        const yyyy = thaiDateObj.getFullYear();
-        const mm = String(thaiDateObj.getMonth() + 1).padStart(2, '0');
-        const dd = String(thaiDateObj.getDate()).padStart(2, '0');
-        const todayStr = `${yyyy}-${mm}-${dd}`;
-
-        // สำหรับกะดึก ต้องดึงข้อมูลของ "เมื่อวาน" เริ่ม 18:00
-        const yesterdayObj = new Date(thaiDateObj);
+        const todayObj = new Date();
+        const yesterdayObj = new Date(todayObj);
         yesterdayObj.setDate(yesterdayObj.getDate() - 1);
-        const y_yyyy = yesterdayObj.getFullYear();
-        const y_mm = String(yesterdayObj.getMonth() + 1).padStart(2, '0');
-        const y_dd = String(yesterdayObj.getDate()).padStart(2, '0');
-        const yesterdayStr = `${y_yyyy}-${y_mm}-${y_dd}`;
+
+        const todayStr = todayObj.toISOString().slice(0, 10);
+        const yesterdayStr = yesterdayObj.toISOString().slice(0, 10);
 
         // ดึงข้อมูล 18:00 ของเมื่อวาน ถึง 06:00 ของวันนี้
         const startDateTime = `${yesterdayStr} 18:00:00`;
@@ -928,8 +718,8 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
         await new Promise(r => setTimeout(r, 500));
         await reportPage.keyboard.press('Enter');
         
-        console.log('   Waiting 3min for Save Dialog...');
-        await new Promise(r => setTimeout(r, 180000)); 
+        console.log('   Waiting 60s for Save Dialog...');
+        await new Promise(r => setTimeout(r, 60000)); 
         
         console.log('   Clicking SAVE (Floppy Disk)...');
         const saveXPath = `//*[@id="root"]/div/div[1]/div[2]/div[2]/div/div/div/ul/li/div/div/div/div/button/svg | //*[@data-testid="SaveOutlinedIcon"]`;
@@ -947,23 +737,28 @@ async function clickByXPath(page, xpath, description = 'Element', timeout = 1000
             try { fs.renameSync(downloadedFile, newFilePath); downloadedFile = newFilePath; } catch (e) {}
         }
 
-        // --- NEW STEP: Process Excel & Extract Pivot Data ---
+        // --- NEW STEP: Process Excel & Extract Pivot Data + Raw Data ---
         const processResult = await processExcelFile(downloadedFile);
         downloadedFile = processResult.filePath;
         const pivotData = processResult.pivotData;
-        const timeBins = processResult.timeBins;
-        const continuousYawnStats = processResult.continuousYawnStats;
+        const rawDataToUpload = processResult.rawData;
+
+        // --- NEW STEP: Upload to Google Sheets ---
+        if (rawDataToUpload && rawDataToUpload.length > 0) {
+            await appendToGoogleSheet(rawDataToUpload);
+        } else {
+            console.log('   ⚠️ No raw data found to upload to Google Sheets.');
+        }
 
         // --- NEW STEP: Generate PDF ---
-        // ใช้หน้า page หลักของ Puppeteer ในการสร้าง PDF HTML
-        const pdfFilePath = await generatePDFSummary(page, pivotData, todayStr, timeBins, continuousYawnStats);
+        const pdfFilePath = await generatePDFSummary(page, pivotData, todayStr);
 
         // --- STEP 8: Email ---
         console.log(`8. Sending Email...`);
         await sendEmail(
             `THAI TRACKING DMS REPORT: ${todayStr} (Night Shift)`, 
-            `ถึง ผู้เกี่ยวข้อง\nรายงาน THAI TRACKING DMS REPORT รอบ 18:00 ถึง 06:00 น. และ สรุปกราฟ PDF\nด้วยความนับถือ\nBOT REPORT`, 
-            [downloadedFile, pdfFilePath] // แนบไป 2 ไฟล์
+            `ถึง ผู้เกี่ยวข้อง\nรายงาน THAI TRACKING DMS REPORT รอบ 18:00 ถึง 06:00 น. และ สรุปกราฟ PDF Top 10\nด้วยความนับถือ\nBOT REPORT`, 
+            [downloadedFile, pdfFilePath] 
         );
 
         // --- STEP 9: Cleanup ---
