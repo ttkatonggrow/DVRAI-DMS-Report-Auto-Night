@@ -173,7 +173,25 @@ async function processExcelFile(filePath) {
                 const rowData = [];
                 for (let c = 1; c <= colCount; c++) {
                     const cell = row.getCell(c);
-                    const textVal = cell.text ? cell.text.trim() : '';
+                    let textVal = '';
+
+                    // ตรวจสอบว่าค่าในเซลล์เป็น Date Object จาก Excel หรือไม่
+                    if (cell.value instanceof Date) {
+                        const d = cell.value;
+                        const year = d.getFullYear();
+                        const month = String(d.getMonth() + 1).padStart(2, '0');
+                        const day = String(d.getDate()).padStart(2, '0');
+                        const hours = String(d.getHours()).padStart(2, '0');
+                        const minutes = String(d.getMinutes()).padStart(2, '0');
+                        const seconds = String(d.getSeconds()).padStart(2, '0');
+                        
+                        // บังคับจัดรูปแบบเป็น YYYY-MM-DD HH:mm:ss
+                        textVal = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+                    } else {
+                        // ถ้าไม่ใช่ Date ให้ดึงข้อความตามปกติ
+                        textVal = cell.text ? cell.text.trim() : '';
+                    }
+                    
                     rowData.push(textVal);
                 }
                 rawDataToUpload.push(rowData);
