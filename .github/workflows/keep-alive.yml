@@ -1,0 +1,24 @@
+name: Auto Keep Alive (Prevent GitHub Cron Suspend)
+
+on:
+  schedule:
+    # รันทุกวันที่ 1 ของเดือน เวลา 00:00 น.
+    - cron: '0 0 1 * *'
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # ทำการเขียนเวลาปัจจุบันทับลงในไฟล์ชั่วคราวเพื่ออัปเดตสถานะการเคลื่อนไหว
+      - name: Dummy Commit to keep active
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          echo "Last Active: $(date)" > keep-alive.txt
+          git add keep-alive.txt
+          git commit -m "chore: keep repository active to prevent cron suspension" || exit 0
+          git push
