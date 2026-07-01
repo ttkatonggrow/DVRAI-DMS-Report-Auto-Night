@@ -9,11 +9,15 @@ on:
 jobs:
   keep-alive:
     runs-on: ubuntu-latest
+    
+    # เพิ่มบล็อกส่วนนี้เพื่อขออนุมัติสิทธิ์ในการเขียนไฟล์ย้อนกลับ (Push) เข้าคลังโค้ด
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # ทำการเขียนเวลาปัจจุบันทับลงในไฟล์ชั่วคราวเพื่ออัปเดตสถานะการเคลื่อนไหว
       - name: Dummy Commit to keep active
         run: |
           git config --global user.name "github-actions[bot]"
